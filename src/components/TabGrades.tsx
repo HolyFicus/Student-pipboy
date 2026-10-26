@@ -12,6 +12,12 @@ import {
 } from '../utils/appDataContext';
 import { AIModeSwitch } from './AIModeSwitch';
 import {
+  syncScheduleClassesToGrades,
+  propagateGradeSubjectToSchedule,
+  loadStoredScheduleClasses,
+  EVENT_GRADES_UPDATED
+} from '../utils/subjectSync';
+import {
   Calculator,
   Plus,
   Bookmark,
@@ -19,6 +25,8 @@ import {
   Layers,
   HelpCircle,
   RotateCcw,
+  RefreshCw,
+  Calendar,
   BookOpen,
   Award,
   BarChart3,
@@ -99,14 +107,37 @@ export const TabGrades: React.FC<TabGradesProps> = ({ links = [] }) => {
     setStoredAIDataMode(newMode);
   };
 
-  // STRICT REQUIREMENT: Initial subjects list is absolutely empty upon first launch
+  // Initial subjects list synced with existing schedule classes if present
   const [subjects, setSubjects] = useState<SubjectItem[]>(() => {
+    let initial: SubjectItem[] = [];
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.SUBJECTS);
-      if (saved) return JSON.parse(saved);
+      if (saved) initial = JSON.parse(saved);
     } catch {}
-    return [];
+    const synced = syncScheduleClassesToGrades(undefined, initial, {
+      persist: true,
+      notifyEvent: false
+    });
+    return synced.subjects;
   });
+
+  const [syncBannerMessage, setSyncBannerMessage] = useState<string | null>(null);
+  const [scheduleClassesCount, setScheduleClassesCount] = useState<number>(
+    () => loadStoredScheduleClasses().length
+  );
+
+  // Listen for schedule-triggered subject updates
+  useEffect(() => {
+    const handleExternalGradesSync = (e: Event) => {
+      const custom = e as CustomEvent<SubjectItem[]>;
+      if (Array.isArray(custom.detail)) {
+        setSubjects(custom.detail);
+        setScheduleClassesCount(loadStoredScheduleClasses().length);
+      }
+    };
+    window.addEventListener(EVENT_GRADES_UPDATED, handleExternalGradesSync);
+    return () => window.removeEventListener(EVENT_GRADES_UPDATED, handleExternalGradesSync);
+  }, []);
 
   const [presets, setPresets] = useState<GradeScalePreset[]>(() => {
     try {
@@ -172,7 +203,49 @@ export const TabGrades: React.FC<TabGradesProps> = ({ links = [] }) => {
   };
 
   const handleUpdateSubject = (updated: SubjectItem) => {
-    setSubjects((prev) => prev.map((s) => (s.id === updated.id ? { ...updated, updatedAt: Date.now() } : s)));
+    setSubjects((prev) =>
+      prev.map((s) => {
+        if (s.id !== updated.id) return s;
+        const propResult = propagateGradeSubjectToSchedule(s, updated);
+        return {
+          ...updated,
+          scheduleKey: propResult.newScheduleKey || updated.scheduleKey,
+          updatedAt: Date.now()
+        };
+      })
+    );
+  };
+
+  const handleManualSyncWithSchedule = () => {
+    pipAudio.playClick();
+    const currentClasses = loadStoredScheduleClasses();
+    setScheduleClassesCount(currentClasses.length);
+
+    if (currentClasses.length === 0) {
+      setSyncBannerMessage(
+        'В расписании пока нет занятий для сверки. Добавьте пары или распознайте скриншот во вкладке «Расписание».'
+      );
+      setTimeout(() => setSyncBannerMessage(null), 4000);
+      return;
+    }
+
+    const res = syncScheduleClassesToGrades(currentClasses, subjects, {
+      persist: true,
+      notifyEvent: false
+    });
+    setSubjects(res.subjects);
+    pipAudio.playSuccess();
+
+    if (res.addedCount > 0 || res.updatedCount > 0) {
+      setSyncBannerMessage(
+        `Синхронизировано с расписанием: добавлено новых дисциплин — ${res.addedCount}, обновлено карточек — ${res.updatedCount} (всего дисциплин в расписании: ${res.totalUniqueInSchedule}).`
+      );
+    } else {
+      setSyncBannerMessage(
+        `Все ${res.totalUniqueInSchedule} дисциплин и преподаватели из расписания уже актуальны в калькуляторе оценок.`
+      );
+    }
+    setTimeout(() => setSyncBannerMessage(null), 4500);
   };
 
   const handleDeleteSubject = (id: string) => {
@@ -339,16 +412,44 @@ ${JSON.stringify(summaryPayload, null, 2)}
             </div>
           </div>
 
-          {/* Action Button: Add Subject */}
-          <button
-            type="button"
-            onClick={handleAddNewSubject}
-            className="px-3.5 py-2 bg-[var(--crt-phosphor)] text-black font-extrabold text-xs font-mono rounded-lg flex items-center gap-1.5 shadow hover:opacity-90 active:scale-95 transition-transform cursor-pointer"
-          >
-            <Plus size={15} className="stroke-[3]" />
-            <span>Добавить предмет</span>
-          </button>
+          {/* Action Buttons: Sync with Schedule & Add Subject */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleManualSyncWithSchedule}
+              className="px-3 py-2 border border-cyan-400/80 bg-cyan-950/50 hover:bg-cyan-400 text-cyan-200 hover:text-black font-bold text-xs font-mono rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              title="Объединить предметы и всех преподавателей из расписания в карточки калькулятора с сохранением набранных баллов"
+            >
+              <RefreshCw size={14} />
+              <span>Сверить с расписанием</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleAddNewSubject}
+              className="px-3.5 py-2 bg-[var(--crt-phosphor)] text-black font-extrabold text-xs font-mono rounded-lg flex items-center gap-1.5 shadow hover:opacity-90 active:scale-95 transition-transform cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Plus size={15} className="stroke-[3]" />
+              <span>Добавить предмет</span>
+            </button>
+          </div>
         </div>
+
+        {syncBannerMessage && (
+          <div className="p-2.5 bg-cyan-950/40 border border-cyan-500/60 rounded-lg text-xs font-mono text-cyan-200 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 size={14} className="text-emerald-400 shrink-0" />
+              <span>{syncBannerMessage}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSyncBannerMessage(null)}
+              className="text-[11px] opacity-75 hover:opacity-100 cursor-pointer shrink-0"
+            >
+              ✕
+            </button>
+          </div>
+        )}
 
         {/* AI Mode Switcher for Grade Strategy Analysis */}
         <AIModeSwitch mode={aiMode} onChange={handleModeChange} showDescription={true} />
@@ -366,18 +467,31 @@ ${JSON.stringify(summaryPayload, null, 2)}
               Список дисциплин пуст
             </h3>
             <p className="text-xs text-[var(--crt-phosphor-dim)] leading-relaxed max-w-md mx-auto">
-              Никаких предзаполненных или демонстрационных предметов. Добавьте свои реальные учебные дисциплины семестра, чтобы настроить индивидуальные шкалы баллов и рассчитывать дефицит до целевой оценки.
+              Добавьте свои учебные дисциплины вручную или синхронизируйте их из вкладки «Расписание» — все предметы и ФИО преподавателей перенесутся автоматически.
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handleAddNewSubject}
-            className="px-4 py-2.5 bg-[var(--crt-phosphor)] text-black font-extrabold text-xs rounded-lg inline-flex items-center gap-2 cursor-pointer shadow hover:opacity-90 active:scale-95 transition-transform"
-          >
-            <Plus size={16} className="stroke-[3]" />
-            <span>Добавить первую дисциплину</span>
-          </button>
+          <div className="flex flex-wrap items-center justify-center gap-2.5">
+            <button
+              type="button"
+              onClick={handleAddNewSubject}
+              className="px-4 py-2.5 bg-[var(--crt-phosphor)] text-black font-extrabold text-xs rounded-lg inline-flex items-center gap-2 cursor-pointer shadow hover:opacity-90 active:scale-95 transition-transform"
+            >
+              <Plus size={16} className="stroke-[3]" />
+              <span>Добавить дисциплину вручную</span>
+            </button>
+
+            {scheduleClassesCount > 0 && (
+              <button
+                type="button"
+                onClick={handleManualSyncWithSchedule}
+                className="px-4 py-2.5 border border-cyan-400 bg-cyan-950/50 hover:bg-cyan-400 text-cyan-200 hover:text-black font-extrabold text-xs rounded-lg inline-flex items-center gap-2 cursor-pointer transition-colors"
+              >
+                <RefreshCw size={15} />
+                <span>Импортировать из расписания ({scheduleClassesCount} пар)</span>
+              </button>
+            )}
+          </div>
         </div>
       ) : (
         <div className="space-y-4">

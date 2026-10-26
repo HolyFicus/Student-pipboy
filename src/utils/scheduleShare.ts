@@ -7,6 +7,7 @@ import {
   LESSON_TYPES_CONFIG,
   extractWeekRangeFromText
 } from '../types/schedule';
+import { SubjectItem } from '../types/grades';
 
 export interface ScheduleExportBundle {
   format: 'PIPBOY_SCHEDULE_V1';
@@ -16,6 +17,7 @@ export interface ScheduleExportBundle {
   authorNote?: string;
   classesCount: number;
   classes: ScheduleClass[];
+  gradeSubjects?: SubjectItem[];
 }
 
 const VALID_DAYS = new Set<DayOfWeek>(['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']);
@@ -61,6 +63,39 @@ function fromBase64Url(b64url: string): string {
     bytes[i] = binary.charCodeAt(i);
   }
   return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Reliable clipboard copy that works both on GitHub Pages and inside Google AI Studio's cross-origin iframe.
+ */
+export async function copyTextWithFallback(text: string): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fallback below for iframe restrictions
+    }
+  }
+  if (typeof document !== 'undefined') {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-9999px';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 /**
@@ -128,12 +163,52 @@ export function normalizeImportedClasses(rawItems: any[]): ScheduleClass[] {
     });
 }
 
+export function normalizeImportedGradeSubjects(rawSubjects: any[]): SubjectItem[] {
+  if (!Array.isArray(rawSubjects)) return [];
+  const now = Date.now();
+  return rawSubjects
+    .filter((s) => s && typeof s === 'object' && s.name)
+    .map((s: any, idx: number): SubjectItem => {
+      const scale =
+        Array.isArray(s.scale) && s.scale.length > 0
+          ? s.scale.map((th: any, thIdx: number) => ({
+              id: th.id || `th-${now}-${idx}-${thIdx}`,
+              label: String(th.label || 'Рубеж'),
+              minScore: Number(th.minScore) || 0
+            }))
+          : [
+              { id: `th-1-${now}-${idx}`, label: 'Отлично', minScore: 85 },
+              { id: `th-2-${now}-${idx}`, label: 'Хорошо', minScore: 70 },
+              { id: `th-3-${now}-${idx}`, label: 'Удовлетворительно', minScore: 50 }
+            ];
+
+      return {
+        id: s.id || `sub-imp-${now}-${idx}`,
+        name: String(s.name || '').trim(),
+        teacherName: s.teacherName ? String(s.teacherName).trim() : '',
+        maxScore: Number(s.maxScore) || 100,
+        currentScore: Number(s.currentScore) || 0,
+        scale,
+        targetScaleId: s.targetScaleId || null,
+        notes: s.notes ? String(s.notes) : undefined,
+        scheduleKey: s.scheduleKey ? String(s.scheduleKey) : undefined,
+        scheduleStats: s.scheduleStats,
+        createdAt: Number(s.createdAt) || now,
+        updatedAt: now
+      };
+    });
+}
+
 /**
  * Creates a JSON export bundle object.
  */
 export function createScheduleExportBundle(
   classes: ScheduleClass[],
-  options?: { groupName?: string; authorNote?: string }
+  options?: {
+    groupName?: string;
+    authorNote?: string;
+    gradeSubjects?: SubjectItem[];
+  }
 ): ScheduleExportBundle {
   return {
     format: 'PIPBOY_SCHEDULE_V1',
@@ -142,7 +217,11 @@ export function createScheduleExportBundle(
     groupName: options?.groupName?.trim() || undefined,
     authorNote: options?.authorNote?.trim() || undefined,
     classesCount: classes.length,
-    classes
+    classes,
+    gradeSubjects:
+      options?.gradeSubjects && options.gradeSubjects.length > 0
+        ? options.gradeSubjects
+        : undefined
   };
 }
 
@@ -151,7 +230,11 @@ export function createScheduleExportBundle(
  */
 export function encodeScheduleShareCode(
   classes: ScheduleClass[],
-  options?: { groupName?: string; authorNote?: string }
+  options?: {
+    groupName?: string;
+    authorNote?: string;
+    gradeSubjects?: SubjectItem[];
+  }
 ): string {
   const compactRows = classes.map((c) => [
     DAY_LIST.indexOf(c.day),
@@ -170,13 +253,32 @@ export function encodeScheduleShareCode(
     c.weekTo ?? ''
   ]);
 
-  const payload = {
+  const compactGrades =
+    options?.gradeSubjects && options.gradeSubjects.length > 0
+      ? options.gradeSubjects.map((s) => {
+          const targetObj = s.scale.find((th) => th.id === s.targetScaleId);
+          return [
+            s.name || '',
+            s.teacherName || '',
+            s.currentScore || 0,
+            s.maxScore || 100,
+            targetObj ? targetObj.minScore : null,
+            s.scale.map((th) => [th.label, th.minScore])
+          ];
+        })
+      : undefined;
+
+  const payload: Record<string, any> = {
     v: 1,
     g: options?.groupName?.trim() || '',
     n: options?.authorNote?.trim() || '',
     t: Math.floor(Date.now() / 1000),
     r: compactRows
   };
+
+  if (compactGrades) {
+    payload.s = compactGrades;
+  }
 
   return 'PIP1:' + toBase64Url(JSON.stringify(payload));
 }
@@ -186,24 +288,55 @@ export function encodeScheduleShareCode(
  */
 export function buildScheduleShareUrl(
   classes: ScheduleClass[],
-  options?: { groupName?: string; authorNote?: string }
+  options?: {
+    groupName?: string;
+    authorNote?: string;
+    gradeSubjects?: SubjectItem[];
+    targetBaseUrl?: string;
+  }
 ): string {
   const code = encodeScheduleShareCode(classes, options);
   const rawToken = code.replace(/^PIP1:/, '');
-  if (typeof window === 'undefined') return code;
-  const url = new URL(window.location.href);
-  url.searchParams.set('import_schedule', rawToken);
-  return url.toString();
+  if (typeof window === 'undefined' && !options?.targetBaseUrl) return code;
+
+  const base = options?.targetBaseUrl?.trim() || window.location.origin + window.location.pathname;
+  try {
+    const url = new URL(base);
+    url.searchParams.delete('import_schedule');
+    url.hash = `import_schedule=${rawToken}`;
+    return url.toString();
+  } catch {
+    const cleanBase = base.split('#')[0].split('?')[0];
+    return `${cleanBase}#import_schedule=${rawToken}`;
+  }
+}
+
+export function extractSharedTokenFromLocation(): string | null {
+  if (typeof window === 'undefined') return null;
+
+  const searchParams = new URLSearchParams(window.location.search);
+  const fromQuery = searchParams.get('import_schedule');
+  if (fromQuery) return fromQuery;
+
+  const hash = window.location.hash || '';
+  if (hash.includes('import_schedule=')) {
+    const match = hash.match(/import_schedule=([^&#\s]+)/);
+    if (match && match[1]) {
+      return decodeURIComponent(match[1]);
+    }
+  }
+  return null;
 }
 
 /**
  * Parses either:
- * - A shareable URL (?import_schedule=...)
+ * - A shareable URL (?import_schedule=... or #import_schedule=...)
  * - A compact share code (PIP1:... or raw base64url)
  * - A JSON string (ScheduleExportBundle or ScheduleClass[])
  */
 export function parseScheduleImportInput(input: string): {
   classes: ScheduleClass[];
+  gradeSubjects?: SubjectItem[];
   groupName?: string;
   authorNote?: string;
   exportedAt?: string;
@@ -213,20 +346,12 @@ export function parseScheduleImportInput(input: string): {
     throw new Error('Введите код расписания, ссылку или выберите JSON-файл.');
   }
 
-  // 1. Check if input is a URL with ?import_schedule=
+  // 1. Check if input is a URL with ?import_schedule= or #import_schedule=
   let tokenCandidate = trimmed;
   if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.includes('import_schedule=')) {
-    try {
-      const url = new URL(trimmed.startsWith('http') ? trimmed : `https://example.com/${trimmed}`);
-      const param = url.searchParams.get('import_schedule');
-      if (param) {
-        tokenCandidate = 'PIP1:' + param;
-      }
-    } catch {
-      const match = trimmed.match(/[?&]import_schedule=([^&#\s]+)/);
-      if (match) {
-        tokenCandidate = 'PIP1:' + decodeURIComponent(match[1]);
-      }
+    const match = trimmed.match(/[?#&]import_schedule=([^&#\s]+)/);
+    if (match && match[1]) {
+      tokenCandidate = 'PIP1:' + decodeURIComponent(match[1]);
     }
   }
 
@@ -243,11 +368,15 @@ export function parseScheduleImportInput(input: string): {
       }
       if (parsed && Array.isArray(parsed.classes)) {
         const classes = normalizeImportedClasses(parsed.classes);
-        if (classes.length === 0) {
+        const gradeSubjects = Array.isArray(parsed.gradeSubjects)
+          ? normalizeImportedGradeSubjects(parsed.gradeSubjects)
+          : undefined;
+        if (classes.length === 0 && (!gradeSubjects || gradeSubjects.length === 0)) {
           throw new Error('В файле расписания список занятий пуст.');
         }
         return {
           classes,
+          gradeSubjects,
           groupName: parsed.groupName,
           authorNote: parsed.authorNote,
           exportedAt: parsed.exportedAt
@@ -286,12 +415,49 @@ export function parseScheduleImportInput(input: string): {
       }));
 
       const classes = normalizeImportedClasses(rawObjects);
-      if (classes.length === 0) {
+
+      let gradeSubjects: SubjectItem[] | undefined;
+      if (Array.isArray(decoded.s)) {
+        const now = Date.now();
+        gradeSubjects = decoded.s.map((sRow: any[], sIdx: number): SubjectItem => {
+          const rawScale = Array.isArray(sRow[5]) ? sRow[5] : [];
+          const scale =
+            rawScale.length > 0
+              ? rawScale.map((th: any[], thIdx: number) => ({
+                  id: `th-${now}-${sIdx}-${thIdx}`,
+                  label: String(th[0] || 'Рубеж'),
+                  minScore: Number(th[1]) || 0
+                }))
+              : [
+                  { id: `th-1-${now}-${sIdx}`, label: 'Отлично', minScore: 85 },
+                  { id: `th-2-${now}-${sIdx}`, label: 'Хорошо', minScore: 70 },
+                  { id: `th-3-${now}-${sIdx}`, label: 'Удовлетворительно', minScore: 50 }
+                ];
+          const targetMin = sRow[4] !== null && sRow[4] !== undefined ? Number(sRow[4]) : null;
+          const matchedTarget =
+            targetMin !== null ? scale.find((th) => th.minScore === targetMin) : undefined;
+
+          return {
+            id: `sub-shared-${now}-${sIdx}`,
+            name: String(sRow[0] || 'Дисциплина'),
+            teacherName: String(sRow[1] || ''),
+            currentScore: Number(sRow[2]) || 0,
+            maxScore: Number(sRow[3]) || 100,
+            scale,
+            targetScaleId: matchedTarget ? matchedTarget.id : null,
+            createdAt: now,
+            updatedAt: now
+          };
+        });
+      }
+
+      if (classes.length === 0 && (!gradeSubjects || gradeSubjects.length === 0)) {
         throw new Error('В коде расписания нет занятий.');
       }
 
       return {
         classes,
+        gradeSubjects,
         groupName: decoded.g || undefined,
         authorNote: decoded.n || undefined,
         exportedAt: decoded.t ? new Date(decoded.t * 1000).toISOString() : undefined

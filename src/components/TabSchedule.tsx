@@ -27,8 +27,19 @@ import {
   encodeScheduleShareCode,
   buildScheduleShareUrl,
   parseScheduleImportInput,
-  formatScheduleAsTextSummary
+  formatScheduleAsTextSummary,
+  extractSharedTokenFromLocation,
+  copyTextWithFallback
 } from '../utils/scheduleShare';
+import {
+  syncScheduleClassesToGrades,
+  loadStoredGradeSubjects,
+  GRADES_SUBJECTS_STORAGE_KEY,
+  EVENT_GRADES_UPDATED,
+  EVENT_SCHEDULE_UPDATED,
+  normalizeSubjectKey
+} from '../utils/subjectSync';
+import { SubjectItem } from '../types/grades';
 import {
   Calendar,
   Clock,
@@ -41,6 +52,7 @@ import {
   Upload,
   Download,
   Share2,
+  RefreshCw,
   Link as LinkIcon,
   FileText,
   Check,
@@ -132,12 +144,27 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
     return () => clearInterval(timer);
   }, []);
 
-  // Save changes
+  // Save changes & automatically synchronize subjects + teachers with Grade Calculator
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEYS.CLASSES, JSON.stringify(classes));
     } catch {}
+    if (classes.length > 0) {
+      syncScheduleClassesToGrades(classes, undefined, { persist: true, notifyEvent: true });
+    }
   }, [classes]);
+
+  // Listen for reverse sync when user renames a subject or edits a teacher in Grade Calculator
+  useEffect(() => {
+    const handleExternalScheduleSync = (e: Event) => {
+      const custom = e as CustomEvent<ScheduleClass[]>;
+      if (Array.isArray(custom.detail)) {
+        setClasses(custom.detail);
+      }
+    };
+    window.addEventListener(EVENT_SCHEDULE_UPDATED, handleExternalScheduleSync);
+    return () => window.removeEventListener(EVENT_SCHEDULE_UPDATED, handleExternalScheduleSync);
+  }, []);
 
   useEffect(() => {
     try {
@@ -166,6 +193,15 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
   const [exportGroupName, setExportGroupName] = useState<string>('');
   const [exportAuthorNote, setExportAuthorNote] = useState<string>('');
   const [exportSubgroupScope, setExportSubgroupScope] = useState<'ALL' | '1' | '2' | '3'>('ALL');
+  const [includeGradesInExport, setIncludeGradesInExport] = useState<boolean>(true);
+  const [targetGitHubPagesUrl, setTargetGitHubPagesUrl] = useState<string>(() => {
+    try {
+      return localStorage.getItem('pipboy_gh_pages_url_v1') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [lastGeneratedShareString, setLastGeneratedShareString] = useState<string>('');
   const [copiedFeedback, setCopiedFeedback] = useState<string | null>(null);
 
   const [importInputText, setImportInputText] = useState<string>('');
@@ -173,20 +209,33 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
   const [importSubgroupFilter, setImportSubgroupFilter] = useState<'ALL' | '1' | '2' | '3'>('ALL');
   const [importPreviewData, setImportPreviewData] = useState<{
     classes: ScheduleClass[];
+    gradeSubjects?: SubjectItem[];
     groupName?: string;
     authorNote?: string;
     exportedAt?: string;
   } | null>(null);
   const jsonFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Auto-detect shared schedule URL (?import_schedule=...) on mount
+  useEffect(() => {
+    try {
+      if (targetGitHubPagesUrl.trim()) {
+        localStorage.setItem('pipboy_gh_pages_url_v1', targetGitHubPagesUrl.trim());
+      } else {
+        localStorage.removeItem('pipboy_gh_pages_url_v1');
+      }
+    } catch {}
+  }, [targetGitHubPagesUrl]);
+
+  // Auto-detect shared schedule URL (?import_schedule=... or #import_schedule=...) on mount and hashchange
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const params = new URLSearchParams(window.location.search);
-    const sharedParam = params.get('import_schedule');
-    if (sharedParam) {
+
+    const checkLocationForSharedSchedule = () => {
+      const sharedToken = extractSharedTokenFromLocation();
+      if (!sharedToken) return;
+
       try {
-        const parsed = parseScheduleImportInput('PIP1:' + sharedParam);
+        const parsed = parseScheduleImportInput('PIP1:' + sharedToken);
         setImportPreviewData(parsed);
         setImportError(null);
         setShareActiveTab('IMPORT');
@@ -197,12 +246,22 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
         setShareActiveTab('IMPORT');
         setIsShareModalOpen(true);
       }
-      // Clean URL parameter without reloading page
+
+      // Clean URL query & hash without reloading page
+      const params = new URLSearchParams(window.location.search);
       params.delete('import_schedule');
       const newSearch = params.toString();
-      const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+      const cleanedHash = (window.location.hash || '').replace(/#?import_schedule=[^&]+&?/, '');
+      const newUrl =
+        window.location.pathname +
+        (newSearch ? `?${newSearch}` : '') +
+        (cleanedHash && cleanedHash !== '#' ? cleanedHash : '');
       window.history.replaceState({}, '', newUrl);
-    }
+    };
+
+    checkLocationForSharedSchedule();
+    window.addEventListener('hashchange', checkLocationForSharedSchedule);
+    return () => window.removeEventListener('hashchange', checkLocationForSharedSchedule);
   }, []);
 
   // Pre-warm Russian OCR worker as soon as AI modal opens so zero time is wasted on click
@@ -732,6 +791,26 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
     setAiText('');
   };
 
+  const handleManualSyncGradesButton = () => {
+    pipAudio.playClick();
+    if (classes.length === 0) {
+      onSendNotification(
+        'РАСПИСАНИЕ ПУСТО',
+        'Добавьте занятия или распознайте скриншот, чтобы синхронизировать предметы с калькулятором оценок.'
+      );
+      return;
+    }
+    const res = syncScheduleClassesToGrades(classes, undefined, {
+      persist: true,
+      notifyEvent: true
+    });
+    pipAudio.playSuccess();
+    onSendNotification(
+      'СИНХРОНИЗАЦИЯ С КАЛЬКУЛЯТОРОМ ОЦЕНОК',
+      `В калькуляторе оценок синхронизировано ${res.totalUniqueInSchedule} дисциплин (добавлено новых: ${res.addedCount}, обновлено преподавателей/данных: ${res.updatedCount}). Набранные баллы сохранены.`
+    );
+  };
+
   // Export & Import Between Users Handlers
   const classesToExport = useMemo(() => {
     if (exportSubgroupScope === 'ALL') return classes;
@@ -745,24 +824,30 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
     }, 2600);
   };
 
+  const getGradesForExport = (): SubjectItem[] | undefined => {
+    if (!includeGradesInExport) return undefined;
+    const synced = syncScheduleClassesToGrades(classesToExport, loadStoredGradeSubjects(), {
+      persist: false,
+      notifyEvent: false
+    });
+    return synced.subjects;
+  };
+
   const handleCopyShareCode = async () => {
     if (classesToExport.length === 0) return;
     pipAudio.playSuccess();
     const code = encodeScheduleShareCode(classesToExport, {
       groupName: exportGroupName,
-      authorNote: exportAuthorNote
+      authorNote: exportAuthorNote,
+      gradeSubjects: getGradesForExport()
     });
-    try {
-      await navigator.clipboard.writeText(code);
-      showCopyFeedback('CODE');
-      onSendNotification(
-        'КОД РАСПИСАНИЯ СКОПИРОВАН',
-        `Код на ${classesToExport.length} пар скопирован. Отправьте его одногруппнику в Telegram или ВК.`
-      );
-    } catch {
-      setImportInputText(code);
-      showCopyFeedback('CODE');
-    }
+    setLastGeneratedShareString(code);
+    await copyTextWithFallback(code);
+    showCopyFeedback('CODE');
+    onSendNotification(
+      'КОД РАСПИСАНИЯ СКОПИРОВАН',
+      `Код на ${classesToExport.length} пар скопирован. Вставьте его на GitHub Pages или отправьте одногруппнику.`
+    );
   };
 
   const handleCopyShareUrl = async () => {
@@ -770,34 +855,30 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
     pipAudio.playSuccess();
     const url = buildScheduleShareUrl(classesToExport, {
       groupName: exportGroupName,
-      authorNote: exportAuthorNote
+      authorNote: exportAuthorNote,
+      gradeSubjects: getGradesForExport(),
+      targetBaseUrl: targetGitHubPagesUrl.trim() || undefined
     });
-    try {
-      await navigator.clipboard.writeText(url);
-      showCopyFeedback('URL');
-      onSendNotification(
-        'ССЫЛКА НА РАСПИСАНИЕ СКОПИРОВАНА',
-        'При переходе по этой ссылке у другого пользователя сразу откроется окно импорта вашего расписания.'
-      );
-    } catch {
-      showCopyFeedback('URL');
-    }
+    setLastGeneratedShareString(url);
+    await copyTextWithFallback(url);
+    showCopyFeedback('URL');
+    onSendNotification(
+      'ССЫЛКА НА РАСПИСАНИЕ СКОПИРОВАНА',
+      'Безопасная хеш-ссылка (#import_schedule=...) скопирована и работает как на GitHub Pages, так и в AI Studio.'
+    );
   };
 
   const handleCopyReadableText = async () => {
     if (classesToExport.length === 0) return;
     pipAudio.playSuccess();
     const text = formatScheduleAsTextSummary(classesToExport, exportGroupName);
-    try {
-      await navigator.clipboard.writeText(text);
-      showCopyFeedback('TEXT');
-      onSendNotification(
-        'ТЕКСТ РАСПИСАНИЯ СКОПИРОВАН',
-        'Текстовая сводка по дням недели готова к отправке в чат группы.'
-      );
-    } catch {
-      showCopyFeedback('TEXT');
-    }
+    setLastGeneratedShareString(text);
+    await copyTextWithFallback(text);
+    showCopyFeedback('TEXT');
+    onSendNotification(
+      'ТЕКСТ РАСПИСАНИЯ СКОПИРОВАН',
+      'Текстовая сводка по дням недели готова к отправке в чат группы.'
+    );
   };
 
   const handleDownloadJsonSchedule = () => {
@@ -805,9 +886,12 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
     pipAudio.playSuccess();
     const bundle = createScheduleExportBundle(classesToExport, {
       groupName: exportGroupName,
-      authorNote: exportAuthorNote
+      authorNote: exportAuthorNote,
+      gradeSubjects: getGradesForExport()
     });
-    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json;charset=utf-8' });
+    const jsonString = JSON.stringify(bundle, null, 2);
+    setLastGeneratedShareString(jsonString);
+    const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const datePart = new Date().toISOString().slice(0, 10);
@@ -885,16 +969,54 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
       id: `user-import-${Date.now()}-${idx}`
     }));
 
-    if (replaceExisting) {
-      setClasses(importedWithFreshIds);
-    } else {
-      setClasses((prev) => [...prev, ...importedWithFreshIds]);
+    const nextClasses = replaceExisting
+      ? importedWithFreshIds
+      : [...classes, ...importedWithFreshIds];
+
+    setClasses(nextClasses);
+
+    // Also merge imported grade subjects if present in bundle, then run schedule->grades sync
+    let baseGrades = loadStoredGradeSubjects();
+    if (importPreviewData.gradeSubjects && importPreviewData.gradeSubjects.length > 0) {
+      const mergedByKey = new Map<string, SubjectItem>();
+      for (const existing of baseGrades) {
+        mergedByKey.set(existing.scheduleKey || normalizeSubjectKey(existing.name), existing);
+      }
+      for (const incoming of importPreviewData.gradeSubjects) {
+        const key = incoming.scheduleKey || normalizeSubjectKey(incoming.name);
+        const existing = mergedByKey.get(key);
+        if (!existing) {
+          mergedByKey.set(key, { ...incoming, scheduleKey: key });
+        } else {
+          mergedByKey.set(key, {
+            ...existing,
+            teacherName: existing.teacherName || incoming.teacherName,
+            currentScore: existing.currentScore > 0 ? existing.currentScore : incoming.currentScore,
+            maxScore: existing.maxScore || incoming.maxScore,
+            scale: existing.scale?.length ? existing.scale : incoming.scale,
+            targetScaleId: existing.targetScaleId || incoming.targetScaleId
+          });
+        }
+      }
+      baseGrades = Array.from(mergedByKey.values());
     }
+
+    const syncRes = syncScheduleClassesToGrades(nextClasses, baseGrades, {
+      persist: true,
+      notifyEvent: true
+    });
+
+    try {
+      localStorage.setItem(GRADES_SUBJECTS_STORAGE_KEY, JSON.stringify(syncRes.subjects));
+      window.dispatchEvent(
+        new CustomEvent<SubjectItem[]>(EVENT_GRADES_UPDATED, { detail: syncRes.subjects })
+      );
+    } catch {}
 
     const groupNotice = importPreviewData.groupName ? ` (${importPreviewData.groupName})` : '';
     onSendNotification(
-      'РАСПИСАНИЕ ИМПОРТИРОВАНО',
-      `Загружено ${importedWithFreshIds.length} пар от пользователя${groupNotice}.`
+      'РАСПИСАНИЕ И ПРЕДМЕТЫ ИМПОРТИРОВАНЫ',
+      `Загружено ${importedWithFreshIds.length} пар${groupNotice} и синхронизировано ${syncRes.totalUniqueInSchedule} предметов в калькуляторе оценок.`
     );
 
     setIsShareModalOpen(false);
@@ -971,6 +1093,16 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
             >
               <Share2 size={14} />
               <span>ЭКСПОРТ / ИМПОРТ</span>
+            </button>
+
+            {/* Sync Schedule Subjects with Grade Calculator Button */}
+            <button
+              onClick={handleManualSyncGradesButton}
+              className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 border border-emerald-500/70 bg-emerald-950/50 text-emerald-300 hover:bg-emerald-400 hover:text-black transition-colors rounded cursor-pointer font-bold"
+              title="Синхронизировать все дисциплины и преподавателей из расписания с Умным калькулятором оценок"
+            >
+              <RefreshCw size={13} />
+              <span>СИНХР. С ОЦЕНКАМИ</span>
             </button>
 
             {/* Clear All Schedule Button */}
@@ -2455,6 +2587,28 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
                           ))}
                         </div>
                       </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-cyan-900/50">
+                        <label className="flex items-center gap-2 cursor-pointer text-[11px] text-cyan-100">
+                          <input
+                            type="checkbox"
+                            checked={includeGradesInExport}
+                            onChange={(e) => setIncludeGradesInExport(e.target.checked)}
+                            className="accent-cyan-400 w-4 h-4 cursor-pointer"
+                          />
+                          <span>Включить предметы и баллы калькулятора оценок</span>
+                        </label>
+                        <div>
+                          <input
+                            type="url"
+                            placeholder="URL вашего сайта на GitHub Pages (необязательно)"
+                            value={targetGitHubPagesUrl}
+                            onChange={(e) => setTargetGitHubPagesUrl(e.target.value)}
+                            className="w-full bg-black border border-cyan-800 focus:border-cyan-400 px-2.5 py-1 rounded text-[11px] outline-none"
+                            title="Если вы находитесь в Google AI Studio, укажите адрес вашего сайта на GitHub Pages, чтобы генерировать прямые ссылки сразу для него"
+                          />
+                        </div>
+                      </div>
                     </div>
 
                     {/* Export Actions Grid */}
@@ -2469,10 +2623,10 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
                           <div className="space-y-1">
                             <div className="font-extrabold text-cyan-200 flex items-center gap-1.5">
                               <LinkIcon size={14} className="text-cyan-400" />
-                              <span>Прямая ссылка для одногруппников</span>
+                              <span>Прямая ссылка (AI Studio ↔ GitHub Pages)</span>
                             </div>
                             <p className="text-[11px] opacity-80 leading-relaxed">
-                              Отправьте ссылку в чат группы. При переходе по ней у одногруппника сразу откроется предпросмотр вашего расписания в приложении.
+                              Хеш-ссылка (`#import_schedule=...`) без ограничений длины URL. Отправьте одногруппнику или откройте на GitHub Pages для мгновенного переноса.
                             </p>
                           </div>
                           <button
@@ -2502,7 +2656,7 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
                               <span>Компактный код обмена (PIP1:...)</span>
                             </div>
                             <p className="text-[11px] opacity-80 leading-relaxed">
-                              Текстовый код со всеми парами, подгруппами и неделями. Другой студент вставляет его во вкладке «Импорт» без скачивания файлов.
+                              Текстовый код со всеми парами, подгруппами, неделями и предметами БРС. Вставьте его во вкладке «Импорт» на любом устройстве.
                             </p>
                           </div>
                           <button
@@ -2532,7 +2686,7 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
                               <span>Скачать файл расписания (.JSON)</span>
                             </div>
                             <p className="text-[11px] opacity-80 leading-relaxed">
-                              Полная резервная копия в файле `.json`. Удобно для пересылки документом в Telegram/ВК или переноса между браузерами.
+                              Полная резервная копия расписания и предметов калькулятора оценок в файле `.json`.
                             </p>
                           </div>
                           <button
@@ -2584,6 +2738,28 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
                           </button>
                         </div>
                       </div>
+
+                      {lastGeneratedShareString && (
+                        <div className="p-2.5 bg-black/80 border border-cyan-500/40 rounded-lg space-y-1">
+                          <div className="flex items-center justify-between text-[10px] text-cyan-300">
+                            <span>Сформированный код / ссылка (доступно для выделения вручную):</span>
+                            <button
+                              type="button"
+                              onClick={() => copyTextWithFallback(lastGeneratedShareString)}
+                              className="underline hover:text-cyan-100 cursor-pointer"
+                            >
+                              Скопировать ещё раз
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            readOnly
+                            value={lastGeneratedShareString}
+                            onFocus={(e) => e.currentTarget.select()}
+                            className="w-full bg-black border border-cyan-900 px-2 py-1 rounded text-[11px] font-mono text-cyan-100 outline-none"
+                          />
+                        </div>
+                      )}
                     </div>
                   </div>
                 )

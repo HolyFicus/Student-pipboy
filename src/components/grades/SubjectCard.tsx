@@ -212,6 +212,44 @@ export const SubjectCard: React.FC<SubjectCardProps> = ({
             </button>
           )}
         </div>
+
+        {/* Synchronized Schedule Metadata Summary (unboxed text with · separators) */}
+        {subject.scheduleStats && subject.scheduleStats.classesCount > 0 && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-mono text-[var(--crt-phosphor)]/80 pt-0.5">
+            <span className="text-emerald-400 font-semibold">
+              В расписании: {subject.scheduleStats.classesCount}{' '}
+              {subject.scheduleStats.classesCount === 1
+                ? 'занятие'
+                : subject.scheduleStats.classesCount < 5
+                ? 'занятия'
+                : 'занятий'}
+            </span>
+            {subject.scheduleStats.days.length > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>Дни: {subject.scheduleStats.days.join(', ')}</span>
+              </>
+            )}
+            {subject.scheduleStats.lessonTypes.length > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{subject.scheduleStats.lessonTypes.join(', ')}</span>
+              </>
+            )}
+            {subject.scheduleStats.subgroups.length > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>Подгр.: {subject.scheduleStats.subgroups.map((sg) => `${sg})`).join(', ')}</span>
+              </>
+            )}
+            {subject.scheduleStats.classrooms.length > 0 && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>Ауд. {subject.scheduleStats.classrooms.join(', ')}</span>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Main Points Row: Strict Mobile Inputs with inputmode="numeric" and placeholder instead of value="0" */}
