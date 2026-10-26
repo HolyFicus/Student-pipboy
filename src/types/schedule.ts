@@ -16,11 +16,99 @@ export interface ScheduleClass {
   endTime: string; // '10:30'
   subject: string;
   lessonType: LessonType;
+  subgroup?: string; // '1', '2', '3'
+  weekFrom?: number; // e.g. 10 for "после 9 недели"
+  weekTo?: number; // e.g. 9 for "до 9 недели"
+  weekRangeLabel?: string; // e.g. 'до 9 нед.' or 'после 9 нед.'
   classroom?: string;
   teacher?: string;
   notes?: string;
   linkUrl?: string;
   notificationEnabled?: boolean;
+}
+
+/**
+ * Extracts week range constraints ("до 9 недели", "после 9 недели", "с 3 по 9 неделю") from notes/comments.
+ */
+export function extractWeekRangeFromText(text?: string): {
+  weekFrom?: number;
+  weekTo?: number;
+  weekRangeLabel?: string;
+} {
+  if (!text) return {};
+  const norm = text.toLowerCase();
+
+  let weekFrom: number | undefined;
+  let weekTo: number | undefined;
+  const labels: string[] = [];
+
+  // Match "с X по Y нед"
+  const rangeMatch = norm.match(/с\s*(\d{1,2})\s*по\s*(\d{1,2})\s*нед/i);
+  if (rangeMatch) {
+    weekFrom = Number(rangeMatch[1]);
+    weekTo = Number(rangeMatch[2]);
+    labels.push(`${weekFrom}–${weekTo} нед.`);
+  } else {
+    // Match "до N недели" (inclusive of week N)
+    const upToMatch = norm.match(/до\s*(\d{1,2})\s*(?:-?й?\s*)?нед/i);
+    if (upToMatch) {
+      weekTo = Number(upToMatch[1]);
+      labels.push(`до ${weekTo} нед.`);
+    }
+
+    // Match "после N недели" (starts from week N + 1)
+    const afterMatch = norm.match(/после\s*(\d{1,2})\s*(?:-?й?\s*)?нед/i);
+    if (afterMatch) {
+      const afterWeek = Number(afterMatch[1]);
+      weekFrom = afterWeek + 1;
+      labels.push(`после ${afterWeek} нед.`);
+    }
+
+    // Match "с N недели"
+    if (!weekFrom) {
+      const fromWeekMatch = norm.match(/с\s*(\d{1,2})\s*(?:-?й?\s*)?нед/i);
+      if (fromWeekMatch) {
+        weekFrom = Number(fromWeekMatch[1]);
+        labels.push(`с ${weekFrom} нед.`);
+      }
+    }
+  }
+
+  // Also check start date like "с 21.09." or "с 24.09."
+  const dateStartMatch = norm.match(/с\s*(\d{1,2}\.\d{2})\.?/i);
+  if (dateStartMatch && labels.length > 0) {
+    labels.push(`с ${dateStartMatch[1]}`);
+  }
+
+  return {
+    weekFrom,
+    weekTo,
+    weekRangeLabel: labels.length > 0 ? labels.join(', ') : undefined
+  };
+}
+
+/**
+ * Checks whether a class is active on the given academic week number (e.g. Week 9).
+ */
+export function isClassActiveOnAcademicWeek(
+  cls: ScheduleClass,
+  academicWeekNum: number | null | undefined
+): boolean {
+  if (!academicWeekNum || academicWeekNum <= 0) return true;
+
+  // Use explicit weekFrom / weekTo or derive from notes
+  const derived =
+    cls.weekFrom !== undefined || cls.weekTo !== undefined
+      ? { weekFrom: cls.weekFrom, weekTo: cls.weekTo }
+      : extractWeekRangeFromText(cls.notes);
+
+  if (derived.weekFrom !== undefined && academicWeekNum < derived.weekFrom) {
+    return false;
+  }
+  if (derived.weekTo !== undefined && academicWeekNum > derived.weekTo) {
+    return false;
+  }
+  return true;
 }
 
 export interface ScheduleNotificationConfig {
