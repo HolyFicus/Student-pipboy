@@ -23,6 +23,13 @@ import {
   prewarmScheduleOcrWorker
 } from '../utils/staticHostFallback';
 import {
+  createScheduleExportBundle,
+  encodeScheduleShareCode,
+  buildScheduleShareUrl,
+  parseScheduleImportInput,
+  formatScheduleAsTextSummary
+} from '../utils/scheduleShare';
+import {
   Calendar,
   Clock,
   Plus,
@@ -32,6 +39,8 @@ import {
   Trash2,
   Edit2,
   Upload,
+  Download,
+  Share2,
   Link as LinkIcon,
   FileText,
   Check,
@@ -149,7 +158,52 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
 
   const [isAIModalOpen, setIsAIModalOpen] = useState(false);
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
-  useModalScrollLock(isAddEditModalOpen || isAIModalOpen || isConfigModalOpen);
+  const [isShareModalOpen, setIsShareModalOpen] = useState(false);
+  const [shareActiveTab, setShareActiveTab] = useState<'EXPORT' | 'IMPORT'>('EXPORT');
+  useModalScrollLock(isAddEditModalOpen || isAIModalOpen || isConfigModalOpen || isShareModalOpen);
+
+  // Share / Export / Import State
+  const [exportGroupName, setExportGroupName] = useState<string>('');
+  const [exportAuthorNote, setExportAuthorNote] = useState<string>('');
+  const [exportSubgroupScope, setExportSubgroupScope] = useState<'ALL' | '1' | '2' | '3'>('ALL');
+  const [copiedFeedback, setCopiedFeedback] = useState<string | null>(null);
+
+  const [importInputText, setImportInputText] = useState<string>('');
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSubgroupFilter, setImportSubgroupFilter] = useState<'ALL' | '1' | '2' | '3'>('ALL');
+  const [importPreviewData, setImportPreviewData] = useState<{
+    classes: ScheduleClass[];
+    groupName?: string;
+    authorNote?: string;
+    exportedAt?: string;
+  } | null>(null);
+  const jsonFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-detect shared schedule URL (?import_schedule=...) on mount
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const sharedParam = params.get('import_schedule');
+    if (sharedParam) {
+      try {
+        const parsed = parseScheduleImportInput('PIP1:' + sharedParam);
+        setImportPreviewData(parsed);
+        setImportError(null);
+        setShareActiveTab('IMPORT');
+        setIsShareModalOpen(true);
+        pipAudio.playSuccess();
+      } catch (err: any) {
+        setImportError(err.message || 'Не удалось прочитать расписание из ссылки.');
+        setShareActiveTab('IMPORT');
+        setIsShareModalOpen(true);
+      }
+      // Clean URL parameter without reloading page
+      params.delete('import_schedule');
+      const newSearch = params.toString();
+      const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash;
+      window.history.replaceState({}, '', newUrl);
+    }
+  }, []);
 
   // Pre-warm Russian OCR worker as soon as AI modal opens so zero time is wasted on click
   useEffect(() => {
@@ -678,6 +732,177 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
     setAiText('');
   };
 
+  // Export & Import Between Users Handlers
+  const classesToExport = useMemo(() => {
+    if (exportSubgroupScope === 'ALL') return classes;
+    return classes.filter((c) => !c.subgroup || c.subgroup === exportSubgroupScope);
+  }, [classes, exportSubgroupScope]);
+
+  const showCopyFeedback = (label: string) => {
+    setCopiedFeedback(label);
+    setTimeout(() => {
+      setCopiedFeedback((prev) => (prev === label ? null : prev));
+    }, 2600);
+  };
+
+  const handleCopyShareCode = async () => {
+    if (classesToExport.length === 0) return;
+    pipAudio.playSuccess();
+    const code = encodeScheduleShareCode(classesToExport, {
+      groupName: exportGroupName,
+      authorNote: exportAuthorNote
+    });
+    try {
+      await navigator.clipboard.writeText(code);
+      showCopyFeedback('CODE');
+      onSendNotification(
+        'КОД РАСПИСАНИЯ СКОПИРОВАН',
+        `Код на ${classesToExport.length} пар скопирован. Отправьте его одногруппнику в Telegram или ВК.`
+      );
+    } catch {
+      setImportInputText(code);
+      showCopyFeedback('CODE');
+    }
+  };
+
+  const handleCopyShareUrl = async () => {
+    if (classesToExport.length === 0) return;
+    pipAudio.playSuccess();
+    const url = buildScheduleShareUrl(classesToExport, {
+      groupName: exportGroupName,
+      authorNote: exportAuthorNote
+    });
+    try {
+      await navigator.clipboard.writeText(url);
+      showCopyFeedback('URL');
+      onSendNotification(
+        'ССЫЛКА НА РАСПИСАНИЕ СКОПИРОВАНА',
+        'При переходе по этой ссылке у другого пользователя сразу откроется окно импорта вашего расписания.'
+      );
+    } catch {
+      showCopyFeedback('URL');
+    }
+  };
+
+  const handleCopyReadableText = async () => {
+    if (classesToExport.length === 0) return;
+    pipAudio.playSuccess();
+    const text = formatScheduleAsTextSummary(classesToExport, exportGroupName);
+    try {
+      await navigator.clipboard.writeText(text);
+      showCopyFeedback('TEXT');
+      onSendNotification(
+        'ТЕКСТ РАСПИСАНИЯ СКОПИРОВАН',
+        'Текстовая сводка по дням недели готова к отправке в чат группы.'
+      );
+    } catch {
+      showCopyFeedback('TEXT');
+    }
+  };
+
+  const handleDownloadJsonSchedule = () => {
+    if (classesToExport.length === 0) return;
+    pipAudio.playSuccess();
+    const bundle = createScheduleExportBundle(classesToExport, {
+      groupName: exportGroupName,
+      authorNote: exportAuthorNote
+    });
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const datePart = new Date().toISOString().slice(0, 10);
+    const safeGroup = exportGroupName
+      ? '-' + exportGroupName.trim().replace(/[^a-zA-Zа-яА-ЯёЁ0-9_-]+/g, '_')
+      : '';
+    a.href = url;
+    a.download = `pipboy-schedule${safeGroup}-${datePart}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showCopyFeedback('JSON');
+    onSendNotification(
+      'ФАЙЛ РАСПИСАНИЯ СОХРАНЁН',
+      `Экспортировано ${classesToExport.length} занятий в JSON-файл.`
+    );
+  };
+
+  const handleJsonFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    pipAudio.playClick();
+    setImportError(null);
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const content = String(reader.result || '');
+        const parsed = parseScheduleImportInput(content);
+        setImportPreviewData(parsed);
+        setImportSubgroupFilter('ALL');
+        pipAudio.playSuccess();
+      } catch (err: any) {
+        setImportError(err.message || 'Ошибка чтения файла расписания.');
+        pipAudio.playAlert();
+      }
+    };
+    reader.onerror = () => {
+      setImportError('Не удалось прочитать выбранный файл.');
+      pipAudio.playAlert();
+    };
+    reader.readAsText(file, 'utf-8');
+    e.target.value = '';
+  };
+
+  const handleParseImportText = () => {
+    pipAudio.playClick();
+    setImportError(null);
+    try {
+      const parsed = parseScheduleImportInput(importInputText);
+      setImportPreviewData(parsed);
+      setImportSubgroupFilter('ALL');
+      pipAudio.playSuccess();
+    } catch (err: any) {
+      setImportError(err.message || 'Не удалось распознать код или ссылку расписания.');
+      pipAudio.playAlert();
+    }
+  };
+
+  const filteredImportPreviewClasses = useMemo(() => {
+    if (!importPreviewData) return [];
+    if (importSubgroupFilter === 'ALL') return importPreviewData.classes;
+    return importPreviewData.classes.filter(
+      (c) => !c.subgroup || c.subgroup === importSubgroupFilter
+    );
+  }, [importPreviewData, importSubgroupFilter]);
+
+  const handleConfirmUserImport = (replaceExisting: boolean) => {
+    if (!importPreviewData || filteredImportPreviewClasses.length === 0) return;
+    pipAudio.playSuccess();
+
+    const importedWithFreshIds = filteredImportPreviewClasses.map((c, idx) => ({
+      ...c,
+      id: `user-import-${Date.now()}-${idx}`
+    }));
+
+    if (replaceExisting) {
+      setClasses(importedWithFreshIds);
+    } else {
+      setClasses((prev) => [...prev, ...importedWithFreshIds]);
+    }
+
+    const groupNotice = importPreviewData.groupName ? ` (${importPreviewData.groupName})` : '';
+    onSendNotification(
+      'РАСПИСАНИЕ ИМПОРТИРОВАНО',
+      `Загружено ${importedWithFreshIds.length} пар от пользователя${groupNotice}.`
+    );
+
+    setIsShareModalOpen(false);
+    setImportPreviewData(null);
+    setImportInputText('');
+    setImportError(null);
+  };
+
   return (
     <div className="space-y-4 font-mono">
       {/* Top Header & Academic Parity Banner */}
@@ -731,6 +956,21 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
             >
               <Plus size={14} />
               <span>ДОБАВИТЬ ПАРУ</span>
+            </button>
+
+            {/* Share / Export / Import Schedule Between Users Button */}
+            <button
+              onClick={() => {
+                pipAudio.playClick();
+                setShareActiveTab(classes.length > 0 ? 'EXPORT' : 'IMPORT');
+                setImportError(null);
+                setIsShareModalOpen(true);
+              }}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 border border-cyan-400/80 bg-cyan-950/50 text-cyan-200 hover:bg-cyan-400 hover:text-black transition-colors rounded cursor-pointer font-bold"
+              title="Экспортировать своё расписание или импортировать расписание от одногруппника (по ссылке, коду или JSON-файлу)"
+            >
+              <Share2 size={14} />
+              <span>ЭКСПОРТ / ИМПОРТ</span>
             </button>
 
             {/* Clear All Schedule Button */}
@@ -1025,6 +1265,17 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
               className="px-4 py-2 border border-amber-400 bg-amber-950/40 text-amber-300 font-bold text-xs uppercase rounded cursor-pointer hover:bg-amber-400 hover:text-black transition-colors inline-flex items-center gap-1.5"
             >
               <Sparkles size={14} /> РАСПОЗНАТЬ ПО СКРИНШОТУ
+            </button>
+            <button
+              onClick={() => {
+                pipAudio.playClick();
+                setShareActiveTab('IMPORT');
+                setImportError(null);
+                setIsShareModalOpen(true);
+              }}
+              className="px-4 py-2 border border-cyan-400 bg-cyan-950/40 text-cyan-200 font-bold text-xs uppercase rounded cursor-pointer hover:bg-cyan-400 hover:text-black transition-colors inline-flex items-center gap-1.5"
+            >
+              <Download size={14} /> ИМПОРТ ОТ ОДНОГРУППНИКА
             </button>
           </div>
         </div>
@@ -2071,6 +2322,463 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
                   ГОТОВО
                 </button>
               </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* MODAL 4: EXPORT / IMPORT SCHEDULE BETWEEN USERS */}
+      {isShareModalOpen && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 bg-black/95 flex items-center justify-center p-3 sm:p-4 z-50">
+          <div className="border-2 border-cyan-400 bg-[#050d0c] p-4 sm:p-5 rounded-xl max-w-3xl w-full max-h-[92vh] flex flex-col text-[var(--crt-phosphor)] space-y-4 shadow-[0_0_50px_rgba(34,211,238,0.2)] font-mono">
+            {/* Header */}
+            <div className="text-sm font-bold tracking-wider uppercase flex items-center justify-between border-b border-cyan-400/40 pb-2.5 shrink-0">
+              <span className="flex items-center gap-2 text-cyan-300">
+                <Share2 size={16} /> ОБМЕН РАСПИСАНИЕМ МЕЖДУ ПОЛЬЗОВАТЕЛЯМИ
+              </span>
+              <button
+                onClick={() => setIsShareModalOpen(false)}
+                className="cursor-pointer text-xs p-1 hover:bg-cyan-400/20 rounded text-cyan-300"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Mode Switcher Tabs */}
+            <div className="grid grid-cols-2 gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  pipAudio.playClick();
+                  setShareActiveTab('EXPORT');
+                }}
+                className={`py-2 px-3 rounded border text-xs font-extrabold uppercase flex items-center justify-center gap-2 cursor-pointer transition-colors ${
+                  shareActiveTab === 'EXPORT'
+                    ? 'bg-cyan-400 text-black border-cyan-300'
+                    : 'bg-black/60 text-cyan-200/80 border-cyan-900 hover:border-cyan-500'
+                }`}
+              >
+                <Share2 size={14} />
+                <span>ЭКСПОРТ (ПОДЕЛИТЬСЯ) [{classes.length}]</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  pipAudio.playClick();
+                  setShareActiveTab('IMPORT');
+                }}
+                className={`py-2 px-3 rounded border text-xs font-extrabold uppercase flex items-center justify-center gap-2 cursor-pointer transition-colors ${
+                  shareActiveTab === 'IMPORT'
+                    ? 'bg-cyan-400 text-black border-cyan-300'
+                    : 'bg-black/60 text-cyan-200/80 border-cyan-900 hover:border-cyan-500'
+                }`}
+              >
+                <Download size={14} />
+                <span>ИМПОРТ (ЗАГРУЗИТЬ ОТ ДРУГОГО)</span>
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="overflow-y-auto space-y-4 pr-1 flex-1 text-xs">
+              {shareActiveTab === 'EXPORT' ? (
+                classes.length === 0 ? (
+                  <div className="p-6 border border-dashed border-cyan-800 rounded-lg text-center space-y-3 bg-black/40">
+                    <AlertTriangle size={28} className="mx-auto text-amber-400" />
+                    <div className="font-bold text-sm text-cyan-200">
+                      Ваше расписание пока пусто
+                    </div>
+                    <p className="text-xs opacity-75 max-w-md mx-auto">
+                      Чтобы поделиться расписанием с одногруппниками, сначала добавьте занятия вручную, распознайте скриншот через ИИ или перейдите на вкладку «ИМПОРТ», чтобы загрузить чужое расписание.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShareActiveTab('IMPORT')}
+                      className="px-4 py-2 bg-cyan-400 text-black font-extrabold rounded text-xs uppercase cursor-pointer"
+                    >
+                      ПЕРЕЙТИ К ИМПОРТУ РАСПИСАНИЯ
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Optional Metadata & Subgroup Filter */}
+                    <div className="p-3 bg-black/60 border border-cyan-500/30 rounded-lg space-y-3">
+                      <div className="font-bold text-cyan-300 uppercase text-[11px]">
+                        1. Параметры пакета расписания (необязательно):
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-[10px] uppercase opacity-75 mb-1">
+                            Название группы / курса:
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Напр.: ИГУМ История 1 курс"
+                            value={exportGroupName}
+                            onChange={(e) => setExportGroupName(e.target.value)}
+                            className="w-full bg-black border border-cyan-800 focus:border-cyan-400 px-2.5 py-1.5 rounded text-xs outline-none"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] uppercase opacity-75 mb-1">
+                            Примечание для одногруппников:
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="Напр.: Осенний семестр, все 3 подгруппы"
+                            value={exportAuthorNote}
+                            onChange={(e) => setExportAuthorNote(e.target.value)}
+                            className="w-full bg-black border border-cyan-800 focus:border-cyan-400 px-2.5 py-1.5 rounded text-xs outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <span className="text-[11px] opacity-80">Какие подгруппы включить в экспорт:</span>
+                        <div className="flex items-center border border-cyan-800 rounded overflow-hidden">
+                          {(['ALL', '1', '2', '3'] as const).map((sg) => (
+                            <button
+                              key={sg}
+                              type="button"
+                              onClick={() => {
+                                pipAudio.playClick();
+                                setExportSubgroupScope(sg);
+                              }}
+                              className={`px-2.5 py-1 text-[11px] font-bold cursor-pointer transition-colors ${
+                                exportSubgroupScope === sg
+                                  ? 'bg-cyan-400 text-black'
+                                  : 'bg-black text-cyan-200/80 hover:text-cyan-200'
+                              }`}
+                            >
+                              {sg === 'ALL' ? `Все (${classes.length})` : `${sg} подгр. + общие`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Export Actions Grid */}
+                    <div className="space-y-2.5">
+                      <div className="font-bold text-cyan-300 uppercase text-[11px]">
+                        2. Выберите способ передачи ({classesToExport.length} пар):
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {/* Method 1: Shareable Direct Link */}
+                        <div className="p-3 bg-cyan-950/25 border border-cyan-500/40 rounded-lg flex flex-col justify-between space-y-2.5">
+                          <div className="space-y-1">
+                            <div className="font-extrabold text-cyan-200 flex items-center gap-1.5">
+                              <LinkIcon size={14} className="text-cyan-400" />
+                              <span>Прямая ссылка для одногруппников</span>
+                            </div>
+                            <p className="text-[11px] opacity-80 leading-relaxed">
+                              Отправьте ссылку в чат группы. При переходе по ней у одногруппника сразу откроется предпросмотр вашего расписания в приложении.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleCopyShareUrl}
+                            className="w-full py-2 bg-cyan-400 hover:bg-cyan-300 text-black font-extrabold rounded text-xs uppercase cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+                          >
+                            {copiedFeedback === 'URL' ? (
+                              <>
+                                <Check size={14} />
+                                <span>ССЫЛКА СКОПИРОВАНА!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={14} />
+                                <span>СКОПИРОВАТЬ ССЫЛКУ</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Method 2: Compact Share Code */}
+                        <div className="p-3 bg-emerald-950/25 border border-emerald-500/40 rounded-lg flex flex-col justify-between space-y-2.5">
+                          <div className="space-y-1">
+                            <div className="font-extrabold text-emerald-200 flex items-center gap-1.5">
+                              <Copy size={14} className="text-emerald-400" />
+                              <span>Компактный код обмена (PIP1:...)</span>
+                            </div>
+                            <p className="text-[11px] opacity-80 leading-relaxed">
+                              Текстовый код со всеми парами, подгруппами и неделями. Другой студент вставляет его во вкладке «Импорт» без скачивания файлов.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleCopyShareCode}
+                            className="w-full py-2 border border-emerald-400 bg-emerald-950/60 hover:bg-emerald-400 text-emerald-200 hover:text-black font-extrabold rounded text-xs uppercase cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+                          >
+                            {copiedFeedback === 'CODE' ? (
+                              <>
+                                <Check size={14} />
+                                <span>КОД СКОПИРОВАН!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={14} />
+                                <span>СКОПИРОВАТЬ КОД ОБМЕНА</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Method 3: Download JSON File */}
+                        <div className="p-3 bg-amber-950/20 border border-amber-500/40 rounded-lg flex flex-col justify-between space-y-2.5">
+                          <div className="space-y-1">
+                            <div className="font-extrabold text-amber-200 flex items-center gap-1.5">
+                              <Download size={14} className="text-amber-400" />
+                              <span>Скачать файл расписания (.JSON)</span>
+                            </div>
+                            <p className="text-[11px] opacity-80 leading-relaxed">
+                              Полная резервная копия в файле `.json`. Удобно для пересылки документом в Telegram/ВК или переноса между браузерами.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleDownloadJsonSchedule}
+                            className="w-full py-2 border border-amber-400 bg-amber-950/50 hover:bg-amber-400 text-amber-200 hover:text-black font-extrabold rounded text-xs uppercase cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+                          >
+                            {copiedFeedback === 'JSON' ? (
+                              <>
+                                <Check size={14} />
+                                <span>ФАЙЛ СОХРАНЁН!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Download size={14} />
+                                <span>СКАЧАТЬ .JSON ФАЙЛ</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+
+                        {/* Method 4: Formatted Text for Messengers */}
+                        <div className="p-3 bg-purple-950/20 border border-purple-500/40 rounded-lg flex flex-col justify-between space-y-2.5">
+                          <div className="space-y-1">
+                            <div className="font-extrabold text-purple-200 flex items-center gap-1.5">
+                              <FileText size={14} className="text-purple-400" />
+                              <span>Текст для закреплённого сообщения</span>
+                            </div>
+                            <p className="text-[11px] opacity-80 leading-relaxed">
+                              Читаемое расписание по дням недели со временем, аудиториями и преподавателями для публикации в чате группы.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleCopyReadableText}
+                            className="w-full py-2 border border-purple-400 bg-purple-950/50 hover:bg-purple-400 text-purple-200 hover:text-black font-extrabold rounded text-xs uppercase cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+                          >
+                            {copiedFeedback === 'TEXT' ? (
+                              <>
+                                <Check size={14} />
+                                <span>ТЕКСТ СКОПИРОВАН!</span>
+                              </>
+                            ) : (
+                              <>
+                                <FileText size={14} />
+                                <span>СКОПИРОВАТЬ КАК ТЕКСТ</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              ) : (
+                /* IMPORT TAB */
+                <div className="space-y-4">
+                  {/* File Upload or Code Input */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* Option A: Upload JSON file */}
+                    <div className="p-3.5 bg-black/60 border border-cyan-500/40 rounded-lg flex flex-col justify-between space-y-2.5">
+                      <div className="space-y-1">
+                        <div className="font-extrabold text-cyan-200 uppercase text-[11px] flex items-center gap-1.5">
+                          <Upload size={14} className="text-cyan-400" />
+                          <span>Вариант А: Загрузить файл .JSON</span>
+                        </div>
+                        <p className="text-[11px] opacity-80">
+                          Выберите файл `pipboy-schedule-...json`, который вам прислал одногруппник или староста.
+                        </p>
+                      </div>
+                      <input
+                        ref={jsonFileInputRef}
+                        type="file"
+                        accept=".json,application/json"
+                        onChange={handleJsonFileUpload}
+                        className="hidden"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => jsonFileInputRef.current?.click()}
+                        className="w-full py-2 bg-cyan-950/70 hover:bg-cyan-400 text-cyan-200 hover:text-black border border-cyan-400 font-extrabold rounded text-xs uppercase cursor-pointer flex items-center justify-center gap-1.5 transition-colors"
+                      >
+                        <Upload size={14} />
+                        <span>ВЫБРАТЬ ФАЙЛ .JSON</span>
+                      </button>
+                    </div>
+
+                    {/* Option B: Paste Code or Link */}
+                    <div className="p-3.5 bg-black/60 border border-emerald-500/40 rounded-lg flex flex-col justify-between space-y-2">
+                      <div className="space-y-1">
+                        <div className="font-extrabold text-emerald-200 uppercase text-[11px] flex items-center gap-1.5">
+                          <LinkIcon size={14} className="text-emerald-400" />
+                          <span>Вариант Б: Вставить код или ссылку</span>
+                        </div>
+                        <textarea
+                          rows={2}
+                          placeholder="Вставьте сюда код PIP1:..., ссылку ?import_schedule=... или содержимое JSON"
+                          value={importInputText}
+                          onChange={(e) => setImportInputText(e.target.value)}
+                          className="w-full bg-black border border-emerald-800 focus:border-emerald-400 p-2 rounded text-[11px] font-mono outline-none resize-none"
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            try {
+                              const clip = await navigator.clipboard.readText();
+                              if (clip) {
+                                setImportInputText(clip);
+                                const parsed = parseScheduleImportInput(clip);
+                                setImportPreviewData(parsed);
+                                setImportSubgroupFilter('ALL');
+                                setImportError(null);
+                                pipAudio.playSuccess();
+                              }
+                            } catch {
+                              // User can paste manually via Ctrl+V
+                            }
+                          }}
+                          className="px-2.5 py-1.5 border border-zinc-700 hover:border-emerald-400 text-[11px] rounded cursor-pointer shrink-0"
+                          title="Вставить из буфера обмена"
+                        >
+                          Из буфера
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleParseImportText}
+                          className="flex-1 py-1.5 bg-emerald-400 hover:bg-emerald-300 text-black font-extrabold rounded text-xs uppercase cursor-pointer"
+                        >
+                          ПРОВЕРИТЬ КОД / ССЫЛКУ
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {importError && (
+                    <div className="p-3 border border-red-500 bg-red-950/60 text-red-200 rounded text-xs flex items-center gap-2">
+                      <AlertTriangle size={15} className="text-red-400 shrink-0" />
+                      <span>{importError}</span>
+                    </div>
+                  )}
+
+                  {/* Import Preview */}
+                  {importPreviewData && (
+                    <div className="p-3.5 border border-cyan-400/70 bg-cyan-950/20 rounded-lg space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cyan-500/30 pb-2">
+                        <div>
+                          <div className="font-extrabold text-cyan-200 flex items-center gap-1.5 text-xs uppercase">
+                            <CheckCircle2 size={15} className="text-emerald-400" />
+                            <span>
+                              Готово к импорту: {filteredImportPreviewClasses.length} из {importPreviewData.classes.length} занятий
+                            </span>
+                          </div>
+                          {(importPreviewData.groupName || importPreviewData.authorNote) && (
+                            <div className="text-[11px] text-cyan-100/90 mt-0.5">
+                              {importPreviewData.groupName && (
+                                <span className="font-bold mr-2">Группа: {importPreviewData.groupName}</span>
+                              )}
+                              {importPreviewData.authorNote && (
+                                <span className="opacity-80">• {importPreviewData.authorNote}</span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Subgroup Filter on Import */}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] uppercase opacity-75">Импортировать подгруппу:</span>
+                          <select
+                            value={importSubgroupFilter}
+                            onChange={(e) => setImportSubgroupFilter(e.target.value as 'ALL' | '1' | '2' | '3')}
+                            className="bg-black border border-cyan-500 px-2 py-1 rounded text-[11px] text-cyan-200 font-bold outline-none cursor-pointer"
+                          >
+                            <option value="ALL">Все подгруппы ({importPreviewData.classes.length})</option>
+                            <option value="1">Только 1 подгр. + общие лекции</option>
+                            <option value="2">Только 2 подгр. + общие лекции</option>
+                            <option value="3">Только 3 подгр. + общие лекции</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Compact Preview List */}
+                      <div className="max-h-56 overflow-y-auto border border-cyan-500/30 rounded bg-black/70 divide-y divide-cyan-950">
+                        {filteredImportPreviewClasses.map((c) => {
+                          const dayObj = DAYS_CONFIG.find((d) => d.id === c.day);
+                          const typeObj = LESSON_TYPES_CONFIG.find((t) => t.id === c.lessonType);
+                          return (
+                            <div key={c.id} className="px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                              <div className="flex items-center gap-2">
+                                <span className="font-extrabold text-amber-300 w-7">{dayObj?.shortLabel}</span>
+                                <span className="tabular-nums opacity-85">
+                                  {c.startTime}–{c.endTime}
+                                </span>
+                                {c.subgroup && (
+                                  <span className="px-1.5 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-500/50 text-[10px] font-bold">
+                                    {c.subgroup} подгр.
+                                  </span>
+                                )}
+                                <span className="font-bold text-[var(--crt-phosphor-bright)]">{c.subject}</span>
+                                <span className="text-[10px] opacity-70">({typeObj?.label})</span>
+                              </div>
+                              <div className="flex items-center gap-2 text-[10px] opacity-80">
+                                {c.classroom && <span className="text-amber-200">ауд. {c.classroom}</span>}
+                                {c.teacher && <span>{c.teacher}</span>}
+                                {c.weekRangeLabel && (
+                                  <span className="text-purple-300">[{c.weekRangeLabel}]</span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Confirm Import Buttons */}
+                      <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => handleConfirmUserImport(false)}
+                          className="px-4 py-2 border border-emerald-400 hover:bg-emerald-950/60 text-emerald-300 font-bold rounded text-xs uppercase cursor-pointer"
+                        >
+                          ДОБАВИТЬ К МОИМ ПАРАМ ({filteredImportPreviewClasses.length})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleConfirmUserImport(true)}
+                          className="px-5 py-2 bg-cyan-400 hover:bg-cyan-300 text-black font-extrabold rounded text-xs uppercase cursor-pointer shadow-lg"
+                        >
+                          ЗАМЕНИТЬ МОЁ РАСПИСАНИЕ ({filteredImportPreviewClasses.length})
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end pt-2 border-t border-cyan-500/30 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIsShareModalOpen(false)}
+                className="px-4 py-1.5 border border-zinc-700 hover:border-zinc-500 rounded text-xs cursor-pointer"
+              >
+                ЗАКРЫТЬ
+              </button>
             </div>
           </div>
         </div>,

@@ -63,6 +63,7 @@ export default function App() {
   const initialTab: ActiveTab = (() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
+      if (params.get('import_schedule')) return 'SCHEDULE';
       const view = params.get('view');
       if (view === 'schedule') return 'SCHEDULE';
       if (view === 'grades') return 'GRADES';
