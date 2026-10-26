@@ -1,0 +1,158 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --crt-phosphor: #c084fc;
+    --crt-phosphor-dim: #7e22ce;
+    --crt-phosphor-bright: #e9d5ff;
+    --crt-bg: #11051d;
+    --crt-glow: rgba(192, 132, 252, 0.45);
+    --crt-glow-strong: rgba(216, 180, 254, 0.65);
+  }
+
+  [data-theme="lilac"] {
+    --crt-phosphor: #c084fc;
+    --crt-phosphor-dim: #7e22ce;
+    --crt-phosphor-bright: #e9d5ff;
+    --crt-bg: #11051d;
+    --crt-glow: rgba(192, 132, 252, 0.45);
+    --crt-glow-strong: rgba(216, 180, 254, 0.65);
+  }
+
+  [data-theme="green"] {
+    --crt-phosphor: #22c55e;
+    --crt-phosphor-dim: #15803d;
+    --crt-phosphor-bright: #86efac;
+    --crt-bg: #050d06;
+    --crt-glow: rgba(34, 197, 94, 0.4);
+    --crt-glow-strong: rgba(74, 222, 128, 0.6);
+  }
+
+  [data-theme="amber"] {
+    --crt-phosphor: #f59e0b;
+    --crt-phosphor-dim: #b45309;
+    --crt-phosphor-bright: #fde68a;
+    --crt-bg: #120a02;
+    --crt-glow: rgba(245, 158, 11, 0.4);
+    --crt-glow-strong: rgba(251, 191, 36, 0.6);
+  }
+
+  [data-theme="cyan"] {
+    --crt-phosphor: #38bdf8;
+    --crt-phosphor-dim: #0284c7;
+    --crt-phosphor-bright: #bae6fd;
+    --crt-bg: #020d14;
+    --crt-glow: rgba(56, 189, 248, 0.4);
+    --crt-glow-strong: rgba(125, 211, 252, 0.6);
+  }
+
+  body {
+    font-family: 'Share Tech Mono', 'VT323', monospace;
+    background-color: var(--crt-bg);
+    color: var(--crt-phosphor);
+    overflow-x: hidden;
+  }
+}
+
+/* Scanline and CRT effects */
+.crt-overlay {
+  background: linear-gradient(
+    rgba(18, 16, 16, 0) 50%, 
+    rgba(0, 0, 0, 0.35) 50%
+  ), linear-gradient(
+    90deg,
+    rgba(255, 0, 0, 0.03),
+    rgba(0, 255, 0, 0.01),
+    rgba(0, 0, 255, 0.03)
+  );
+  background-size: 100% 3px, 3px 100%;
+  pointer-events: none;
+}
+
+.crt-vignette {
+  background: radial-gradient(
+    circle at center,
+    transparent 65%,
+    rgba(0, 0, 0, 0.75) 100%
+  );
+  pointer-events: none;
+}
+
+.phosphor-glow {
+  text-shadow: 0 0 6px var(--crt-glow), 0 0 12px var(--crt-glow);
+}
+
+.phosphor-glow-strong {
+  text-shadow: 0 0 8px var(--crt-glow-strong), 0 0 18px var(--crt-glow);
+}
+
+.box-glow {
+  box-shadow: 0 0 10px var(--crt-glow), inset 0 0 10px var(--crt-glow);
+}
+
+.box-glow-subtle {
+  box-shadow: 0 0 6px var(--crt-glow);
+}
+
+/* Custom Scrollbar for Pip-Boy Terminal */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0, 20, 0, 0.6);
+  border: 1px solid var(--crt-phosphor-dim);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--crt-phosphor);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--crt-phosphor-bright);
+}
+
+/* Pip-Boy CRT Flicker */
+@keyframes flicker {
+  0% { opacity: 0.99; }
+  50% { opacity: 1; }
+  52% { opacity: 0.97; }
+  54% { opacity: 1; }
+  80% { opacity: 0.98; }
+  100% { opacity: 1; }
+}
+
+.crt-flicker {
+  animation: flicker 0.15s infinite;
+}
+
+@keyframes scanline-roll {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(1000%); }
+}
+
+.animate-scan-roll {
+  animation: scanline-roll 8s linear infinite;
+}
+
+/* Modal Open: Freeze scrolling and blur underlying UI */
+body.modal-open {
+  overflow: hidden !important;
+  overscroll-behavior: contain;
+}
+
+/* Blur the background CRT screen while leaving modals crystal clear */
+body.modal-open .pipboy-shell-screen {
+  overflow: hidden !important;
+  user-select: none !important;
+}
+
+/* Any modal or overlay must always be razor sharp without filters */
+.modal-portal,
+.modal-overlay,
+[role="dialog"],
+.fixed.z-50 {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-font-smoothing: antialiased;
+}
+

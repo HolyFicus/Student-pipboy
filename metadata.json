@@ -1,0 +1,8 @@
+{
+  "name": "Remix StudentPipBoy",
+  "description": "Тактический наручный терминал студента гуманитарного факультета Pip-Boy 3000: расписание занятий по верхней и нижней неделям с ИИ-распознаванием по скриншоту, мониторинг учебных ресурсов, калькулятор БРС и научный центр.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

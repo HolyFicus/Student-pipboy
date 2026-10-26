@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#071309"/>
+  <rect x="32" y="32" width="448" height="448" rx="80" fill="#0d2813" stroke="#22c55e" stroke-width="10"/>
+  <!-- CRT lines -->
+  <line x1="48" y1="110" x2="464" y2="110" stroke="#16a34a" stroke-width="2" stroke-opacity="0.3"/>
+  <line x1="48" y1="190" x2="464" y2="190" stroke="#16a34a" stroke-width="2" stroke-opacity="0.3"/>
+  <line x1="48" y1="270" x2="464" y2="270" stroke="#16a34a" stroke-width="2" stroke-opacity="0.3"/>
+  <line x1="48" y1="350" x2="464" y2="350" stroke="#16a34a" stroke-width="2" stroke-opacity="0.3"/>
+  <line x1="48" y1="430" x2="464" y2="430" stroke="#16a34a" stroke-width="2" stroke-opacity="0.3"/>
+  <!-- Pip-Boy Face -->
+  <circle cx="256" cy="220" r="90" fill="#15803d" stroke="#4ade80" stroke-width="8"/>
+  <circle cx="225" cy="205" r="12" fill="#22c55e"/>
+  <circle cx="287" cy="205" r="12" fill="#22c55e"/>
+  <path d="M220 250 Q256 280 292 250" stroke="#22c55e" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <!-- Cap -->
+  <polygon points="256,100 360,140 256,180 152,140" fill="#22c55e"/>
+  <polygon points="180,146 180,185 256,206 332,185 332,146 256,170" fill="#15803d"/>
+  <line x1="332" y1="150" x2="358" y2="200" stroke="#4ade80" stroke-width="6"/>
+  <circle cx="358" cy="204" r="8" fill="#4ade80"/>
+  <!-- Radiation/Science symbol badge -->
+  <circle cx="256" cy="380" r="28" fill="#071309" stroke="#4ade80" stroke-width="4"/>
+  <text x="256" y="440" font-family="monospace" font-size="34" font-weight="900" fill="#4ade80" text-anchor="middle" letter-spacing="6">PIP-BOY 3000</text>
+  <text x="256" y="475" font-family="monospace" font-size="20" fill="#22c55e" text-anchor="middle" letter-spacing="4">STUDENT EDITION</text>
+</svg>

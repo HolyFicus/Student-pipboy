@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <title>Pip-Boy 3000 Redirect</title>
+    <script>
+      // Single Page App redirect for GitHub Pages
+      // Preserves path and query parameters
+      sessionStorage.redirect = location.href;
+      var repoPath = location.pathname.split('/')[1];
+      var target = location.pathname.startsWith('/' + repoPath) ? '/' + repoPath + '/' : '/';
+      location.replace(target + (location.search || ''));
+    </script>
+  </head>
+  <body>
+    <p>Перенаправление в Pip-Boy 3000...</p>
+  </body>
+</html>
