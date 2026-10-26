@@ -3,6 +3,7 @@
  * Strictly extracts real written content from the website via backend HTML parser without inventing or hallucinating changes.
  */
 import { MonitoredLink, DiffEntry, SiteWrittenContent, CustomCategory, SiteCheckHistoryPoint } from '../types/pipboy';
+import { resolveApiUrl, checkSiteClientFallback } from './staticHostFallback';
 
 export function generateInitialWrittenContent(url: string, title: string, _category: string): SiteWrittenContent {
   let hostName = url;
@@ -47,25 +48,37 @@ export async function checkMonitoredLink(
   const existingCheckHistory: SiteCheckHistoryPoint[] = [...(link.checkHistory || [])];
 
   try {
-    const response = await fetch('/api/monitor/check-site', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    let data: any = null;
+    try {
+      const response = await fetch(resolveApiUrl('/api/monitor/check-site'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: link.url,
+          title: link.title,
+          previousText,
+          previousHash
+        })
+      });
+
+      if (response.ok) {
+        data = await response.json();
+      }
+    } catch {
+      // Server route unreachable on static hosting (GitHub Pages)
+    }
+
+    if (!data) {
+      data = await checkSiteClientFallback({
         url: link.url,
         title: link.title,
         previousText,
         previousHash
-      })
-    });
+      });
+    }
 
     const now = Date.now();
     const latencyMs = Math.max(12, now - startedAt);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
 
     if (!data.reachable) {
       const point: SiteCheckHistoryPoint = {

@@ -26,6 +26,7 @@ import {
 } from '../utils/pdfOcrEngine';
 import { pipAudio } from '../utils/audio';
 import { useModalScrollLock } from '../utils/useModalScrollLock';
+import { resolveApiUrl, translateTextClientFallback } from '../utils/staticHostFallback';
 import {
   BookOpen,
   Upload,
@@ -247,21 +248,29 @@ export const TabLibrary: React.FC<TabLibraryProps> = ({ onSendNotification }) =>
         const subjectObj = subjects.find((s) => s.id === activeDoc.subjectId);
         const contextLabel = `${activeDoc.title}${subjectObj ? ` (Предмет: ${subjectObj.name})` : ''}, стр./слайд ${activePage.pageNumber}`;
 
-        const res = await fetch('/api/ai/translate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: textToTranslate,
-            targetLang,
-            context: contextLabel
-          })
-        });
+        let data: any = null;
+        try {
+          const res = await fetch(resolveApiUrl('/api/ai/translate'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: textToTranslate,
+              targetLang,
+              context: contextLabel
+            })
+          });
 
-        if (!res.ok) {
-          throw new Error('Не удалось получить ответ от модуля перевода.');
+          if (res.ok) {
+            data = await res.json();
+          }
+        } catch {
+          // Server endpoint unavailable (e.g. GitHub Pages static hosting) -> use client fallback
         }
 
-        const data = await res.json();
+        if (!data || !data.translatedText) {
+          data = await translateTextClientFallback(textToTranslate, targetLang, contextLabel);
+        }
+
         const newTranslation: LibraryPageTranslation = {
           targetLang,
           translatedText: data.translatedText || textToTranslate,

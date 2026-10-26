@@ -11,6 +11,11 @@ import {
 } from '../utils/appDataContext';
 import { AIModeSwitch } from './AIModeSwitch';
 import {
+  resolveApiUrl,
+  translateTextClientFallback,
+  findDatabasesClientFallback
+} from '../utils/staticHostFallback';
+import {
   BookOpen,
   Search,
   Languages,
@@ -342,27 +347,38 @@ export const TabScience: React.FC<TabScienceProps> = ({
     const appSnapshot = collectAppInternalDataSnapshot(links);
 
     try {
-      const res = await fetch('/api/ai/find-databases', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: queryToUse,
-          aiMode: effectiveMode,
-          attachedSites: links.map((l) => ({
-            id: l.id,
-            title: l.title,
-            url: l.url,
-            category: l.category,
-            status: l.status,
-            contentSnippet: l.contentSnippet,
-            writtenContent: l.writtenContent
-          })),
-          appData: appSnapshot
-        })
-      });
+      let data: any = null;
+      try {
+        const res = await fetch(resolveApiUrl('/api/ai/find-databases'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: queryToUse,
+            aiMode: effectiveMode,
+            attachedSites: links.map((l) => ({
+              id: l.id,
+              title: l.title,
+              url: l.url,
+              category: l.category,
+              status: l.status,
+              contentSnippet: l.contentSnippet,
+              writtenContent: l.writtenContent
+            })),
+            appData: appSnapshot
+          })
+        });
 
-      if (!res.ok) throw new Error('Ошибка сервера');
-      const data = await res.json();
+        if (res.ok) {
+          data = await res.json();
+        }
+      } catch {
+        // Static host fallback (GitHub Pages)
+      }
+
+      if (!data || !Array.isArray(data.databases)) {
+        data = findDatabasesClientFallback(queryToUse);
+      }
+
       setAiResults(data);
       pipAudio.playSuccess();
     } catch (err) {
@@ -382,18 +398,33 @@ export const TabScience: React.FC<TabScienceProps> = ({
     pipAudio.playClick();
 
     try {
-      const res = await fetch('/api/ai/translate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: textToTranslate,
-          context: transContext || 'Гуманитарная научная статья / аннотация',
-          targetLang: 'ru'
-        })
-      });
+      let data: any = null;
+      try {
+        const res = await fetch(resolveApiUrl('/api/ai/translate'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: textToTranslate,
+            context: transContext || 'Гуманитарная научная статья / аннотация',
+            targetLang: 'ru'
+          })
+        });
 
-      if (!res.ok) throw new Error('Ошибка при переводе');
-      const data = await res.json();
+        if (res.ok) {
+          data = await res.json();
+        }
+      } catch {
+        // Static host fallback (GitHub Pages)
+      }
+
+      if (!data || !data.translatedText) {
+        data = await translateTextClientFallback(
+          textToTranslate,
+          'ru',
+          transContext || 'Гуманитарная научная статья / аннотация'
+        );
+      }
+
       setTransOutput(data);
       pipAudio.playSuccess();
     } catch (err) {

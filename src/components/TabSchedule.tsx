@@ -14,6 +14,7 @@ import { getMoscowTimeState, MoscowTimeState } from '../utils/academicCalendar';
 import { pipAudio } from '../utils/audio';
 import { sendNativeNotification } from '../utils/notifications';
 import { useModalScrollLock } from '../utils/useModalScrollLock';
+import { resolveApiUrl, parseScheduleClientFallback } from '../utils/staticHostFallback';
 import {
   Calendar,
   Clock,
@@ -310,7 +311,7 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
     sendNativeNotification({
       title,
       body,
-      icon: '/icon-192.svg'
+      icon: './icon-192.svg'
     });
 
     onSendNotification(title, body);
@@ -347,7 +348,7 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
             sendNativeNotification({
               title,
               body,
-              icon: '/icon-192.svg'
+              icon: './icon-192.svg'
             });
 
             onSendNotification(title, body);
@@ -427,25 +428,36 @@ export const TabSchedule: React.FC<TabScheduleProps> = ({ onSendNotification }) 
     pipAudio.playGeiger(4);
 
     try {
-      const res = await fetch('/api/ai/parse-schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image: aiMode === 'image' ? aiImageBase64 : undefined,
-          mimeType: 'image/jpeg',
-          url: aiMode === 'url' ? aiUrl.trim() : undefined,
-          text: aiMode === 'text' ? aiText.trim() : undefined
-        })
-      });
+      let data: any = null;
+      try {
+        const res = await fetch(resolveApiUrl('/api/ai/parse-schedule'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            image: aiMode === 'image' ? aiImageBase64 : undefined,
+            mimeType: 'image/jpeg',
+            url: aiMode === 'url' ? aiUrl.trim() : undefined,
+            text: aiMode === 'text' ? aiText.trim() : undefined
+          })
+        });
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Ошибка сервера при распознавании расписания.');
+        if (res.ok) {
+          data = await res.json();
+        }
+      } catch {
+        // Static host fallback (GitHub Pages)
       }
 
-      const data = await res.json();
+      if (!data || !Array.isArray(data.classes) || data.classes.length === 0) {
+        data = await parseScheduleClientFallback({
+          imageBase64: aiMode === 'image' && aiImageBase64 ? aiImageBase64 : undefined,
+          text: aiMode === 'text' ? aiText.trim() : undefined,
+          url: aiMode === 'url' ? aiUrl.trim() : undefined
+        });
+      }
+
       if (!data.classes || data.classes.length === 0) {
-        throw new Error(data.error || 'В предоставленном источнике не обнаружено учебных занятий. Загрузите чёткий скриншот расписания или прямую ссылку.');
+        throw new Error(data.error || 'В предоставленном источнике не обнаружено учебных занятий. Загрузите чёткий скриншот расписания или вставьте текст.');
       }
 
       // Assign IDs if missing

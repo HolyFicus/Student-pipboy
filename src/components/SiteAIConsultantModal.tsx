@@ -10,6 +10,7 @@ import {
   subscribeToAIDataMode
 } from '../utils/appDataContext';
 import { AIModeSwitch } from './AIModeSwitch';
+import { resolveApiUrl, answerSiteQAClientFallback } from '../utils/staticHostFallback';
 import {
   Bot,
   Send,
@@ -196,7 +197,7 @@ export const SiteAIConsultantModal: React.FC<SiteAIConsultantModalProps> = ({
     const latestAppSnapshot = collectAppInternalDataSnapshot(links);
 
     try {
-      const response = await fetch('/api/ai/site-qa', {
+      const response = await fetch(resolveApiUrl('/api/ai/site-qa'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -253,20 +254,17 @@ export const SiteAIConsultantModal: React.FC<SiteAIConsultantModalProps> = ({
       console.error('Error asking AI:', err);
       pipAudio.playGeiger(2);
 
+      const clientAnalysis = answerSiteQAClientFallback({
+        question: textToSend,
+        appData: latestAppSnapshot,
+        selectedSites: selectedLinks
+      });
+
       const fallbackMsg: SiteQAMessage = {
         id: 'ai-err-' + Date.now(),
         sender: 'assistant',
         aiMode: effectiveMode,
-        text:
-          effectiveMode === 'local'
-            ? `### Отчёт локального контура по запросу: «${textToSend}»\n\n**Анализируемые ресурсы:** ${
-                selectedLinks.length > 0 ? selectedLinks.map((l) => `«${l.title}»`).join(', ') : 'Только внутренние данные приложения'
-              }\n**Данные приложения:** Расписание (${latestAppSnapshot.schedule.length} пар), Оценки (${
-                latestAppSnapshot.grades.length
-              } дисциплин).\n\n- **Письменное содержание:** Все выбранные ресурсы и внутренние таблицы проверены автономным модулем терминала.`
-            : `### Аналитическая сводка (Режим 2: + Интернет) по запросу: «${textToSend}»\n\n**Анализируемые ресурсы:** ${
-                selectedLinks.length > 0 ? selectedLinks.map((l) => `«${l.title}»`).join(', ') : 'Внутренние данные и глобальный поиск'
-              }\n\nОтвет сформирован резервным модулем терминала.`,
+        text: clientAnalysis,
         timestamp: Date.now(),
         siteIds: selectedLinkIds,
         siteTitles: selectedLinks.map((l) => l.title)

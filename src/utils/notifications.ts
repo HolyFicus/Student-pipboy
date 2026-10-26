@@ -20,7 +20,7 @@ export async function requestNotificationPermission(): Promise<NotificationResul
       sendNativeNotification({
         title: 'ROBCO SYSTEM INITIALIZED',
         body: 'Канал оперативной связи Pip-Boy 3000 активирован! Вы будете получать push-оповещения об изменениях сайтов.',
-        icon: '/icon-192.svg'
+        icon: './icon-192.svg'
       });
     }
     return {
@@ -71,15 +71,15 @@ export function sendNativeNotification(opts: SendNotificationOptions): boolean {
       navigator.serviceWorker.ready.then((reg) => {
         reg.showNotification(opts.title, {
           body: opts.body,
-          icon: opts.icon || '/icon-192.svg',
-          badge: opts.badge || '/icon-192.svg',
+          icon: opts.icon || './icon-192.svg',
+          badge: opts.badge || './icon-192.svg',
           tag: opts.tag || 'pipboy-alert',
           data: opts.url || window.location.href,
         } as unknown as NotificationOptions).catch(() => {
           // Fallback to window Notification constructor
           new Notification(opts.title, {
             body: opts.body,
-            icon: opts.icon || '/icon-192.svg',
+            icon: opts.icon || './icon-192.svg',
           });
         });
       });
@@ -89,7 +89,7 @@ export function sendNativeNotification(opts: SendNotificationOptions): boolean {
     // Direct Notification constructor fallback
     new Notification(opts.title, {
       body: opts.body,
-      icon: opts.icon || '/icon-192.svg',
+      icon: opts.icon || './icon-192.svg',
     });
     return true;
   } catch (err) {
