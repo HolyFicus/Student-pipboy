@@ -22,7 +22,7 @@ export function resolveApiUrl(path: string): string {
 }
 
 /**
- * Returns true if the current hostname is GitHub Pages (*.github.io).
+ * Returns true if the current hostname is GitHub Pages (*.github.io) or no backend is configured.
  */
 export function isGitHubPagesHost(): boolean {
   if (typeof window === 'undefined') return false;
@@ -42,8 +42,6 @@ const LANG_NAMES: Record<string, string> = {
 
 /**
  * Client-side translation fallback for GitHub Pages static hosting.
- * Uses public GTX translation endpoint with chunking so full book pages and articles
- * translate reliably in the browser without requiring a Node.js backend.
  */
 export async function translateTextClientFallback(
   text: string,
@@ -65,7 +63,6 @@ export async function translateTextClientFallback(
     };
   }
 
-  // Split text into safe paragraphs (~1200 chars max per request) so URL length stays safe
   const paragraphs = trimmed.split(/\n\n+/);
   const chunks: string[] = [];
   let currentChunk = '';
@@ -106,7 +103,6 @@ export async function translateTextClientFallback(
       // Fall through to secondary translation endpoint
     }
 
-    // Secondary fallback via MyMemory public translation API
     try {
       const sourceGuess = /[А-Яа-яЁё]/.test(chunk) ? 'ru' : 'en';
       if (sourceGuess === targetLang) {
@@ -130,13 +126,18 @@ export async function translateTextClientFallback(
   }
 
   const finalTranslated = translatedChunks.join('\n\n').trim() || trimmed;
-  const detectedLangLabel = LANG_NAMES[detectedCode] || (detectedCode !== 'auto' ? detectedCode.toUpperCase() : 'Автоопределение');
+  const detectedLangLabel =
+    LANG_NAMES[detectedCode] ||
+    (detectedCode !== 'auto' ? detectedCode.toUpperCase() : 'Автоопределение');
 
-  // Extract notable academic/specialized terms from original and translated text
   const words = Array.from(
     new Set(
       (trimmed.match(/[A-Za-zА-Яа-яЁё]{6,}/g) || []).filter(
-        (w) => w.length >= 7 && !/^(которые|которая|который|однако|поэтому|страница|through|between|however|because)$/i.test(w)
+        (w) =>
+          w.length >= 7 &&
+          !/^(которые|которая|который|однако|поэтому|страница|through|between|however|because)$/i.test(
+            w
+          )
       )
     )
   ).slice(0, 4);
@@ -160,9 +161,6 @@ export async function translateTextClientFallback(
   };
 }
 
-/**
- * Simple deterministic string hash for client-side site diff detection on GitHub Pages.
- */
 function computeClientHash(str: string): string {
   let hash = 5381;
   for (let i = 0; i < str.length; i++) {
@@ -172,9 +170,56 @@ function computeClientHash(str: string): string {
 }
 
 /**
- * Client-side website checker for GitHub Pages static mode.
- * Uses public CORS proxy (AllOrigins) to fetch real HTML and compute diffs in the browser.
+ * Fetches webpage HTML via a cascade of public CORS proxies for GitHub Pages static mode.
  */
+async function fetchHtmlViaCorsProxy(targetUrl: string, timeoutMs = 10000): Promise<string> {
+  const proxies = [
+    async () => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(
+          `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
+          { signal: ctrl.signal }
+        );
+        if (!res.ok) throw new Error('allorigins get failed');
+        const data = await res.json();
+        if (typeof data?.contents === 'string' && data.contents.length > 40) {
+          return data.contents;
+        }
+        throw new Error('empty contents');
+      } finally {
+        clearTimeout(t);
+      }
+    },
+    async () => {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(
+          `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`,
+          { signal: ctrl.signal }
+        );
+        if (!res.ok) throw new Error('codetabs failed');
+        const text = await res.text();
+        if (text && text.length > 40) return text;
+        throw new Error('empty text');
+      } finally {
+        clearTimeout(t);
+      }
+    }
+  ];
+
+  for (const attempt of proxies) {
+    try {
+      return await attempt();
+    } catch {
+      // try next proxy
+    }
+  }
+  throw new Error('CORS proxies unreachable');
+}
+
 export async function checkSiteClientFallback(params: {
   url: string;
   title: string;
@@ -202,21 +247,9 @@ export async function checkSiteClientFallback(params: {
   } catch {}
 
   try {
-    const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-    const res = await fetch(proxyUrl);
-    if (!res.ok) {
-      throw new Error('Proxy unreachable');
-    }
-    const data = await res.json();
-    const html = typeof data?.contents === 'string' ? data.contents : '';
-    if (!html || html.length < 40) {
-      throw new Error('Empty HTML');
-    }
-
+    const html = await fetchHtmlViaCorsProxy(url, 9000);
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
-
-    // Remove script/style tags
     doc.querySelectorAll('script, style, noscript, svg').forEach((el) => el.remove());
 
     const pageTitle = doc.querySelector('title')?.textContent?.trim() || `${title} (${hostName})`;
@@ -238,7 +271,8 @@ export async function checkSiteClientFallback(params: {
     const words = bodyText.split(/\s+/).filter(Boolean).length;
     const currentHash = computeClientHash(bodyText.slice(0, 2500));
     const isInitialBaseline = !previousText || previousHash === 'init-hash';
-    const hasChanged = !isInitialBaseline && currentHash !== previousHash && bodyText !== previousText;
+    const hasChanged =
+      !isInitialBaseline && currentHash !== previousHash && bodyText !== previousText;
 
     const writtenContent: SiteWrittenContent = {
       fullTitle: pageTitle,
@@ -292,13 +326,14 @@ export async function checkSiteClientFallback(params: {
       isInitialBaseline: false,
       hasChanged: false,
       currentHash: previousHash,
-      message: 'Ресурс проверен в автономном режиме GitHub Pages (прямой CORS-доступ ограничен сервером сайта).'
+      message:
+        'Ресурс проверен в автономном режиме GitHub Pages (прямой CORS-доступ ограничен сервером сайта).'
     };
   }
 }
 
 /**
- * Client-side analytical assistant fallback for SiteAIConsultantModal on GitHub Pages.
+ * Client-side analytical assistant fallback for SiteAIConsultantModal and TabGrades on GitHub Pages.
  */
 export function answerSiteQAClientFallback(params: {
   question: string;
@@ -308,8 +343,12 @@ export function answerSiteQAClientFallback(params: {
   const { question, appData, selectedSites } = params;
   const q = question.toLowerCase();
 
-  const scheduleClasses = Array.isArray(appData?.schedule?.classes) ? appData.schedule.classes : [];
-  const gradesSubjects = Array.isArray(appData?.grades?.subjects) ? appData.grades.subjects : [];
+  const scheduleClasses = Array.isArray(appData?.schedule?.classes)
+    ? appData.schedule.classes
+    : [];
+  const gradesSubjects = Array.isArray(appData?.grades?.subjects)
+    ? appData.grades.subjects
+    : [];
   const profileName = appData?.profile?.fullName || 'Студент';
 
   const lines: string[] = [];
@@ -322,25 +361,51 @@ export function answerSiteQAClientFallback(params: {
       );
     } else {
       lines.push(`\n**Расписание занятий (всего пар: ${scheduleClasses.length}):**`);
-      for (const cls of scheduleClasses.slice(0, 10)) {
+      for (const cls of scheduleClasses.slice(0, 12)) {
         lines.push(
-          `• **${cls.subject}** — ${cls.day}, ${cls.lessonNumber}-я пара (${cls.startTime}–${cls.endTime}), неделя: ${cls.weekParity}${
-            cls.classroom ? `, ауд. ${cls.classroom}` : ''
+          `• **${cls.subject}** — ${cls.day}, ${cls.startTime}–${cls.endTime}${
+            cls.subgroup ? ` (${cls.subgroup} подгр.)` : ''
+          }${cls.classroom ? `, ауд. ${cls.classroom}` : ''}${
+            cls.teacher ? `, преп. ${cls.teacher}` : ''
           }`
         );
       }
     }
   }
 
-  if (q.includes('оценк') || q.includes('брс') || q.includes('балл') || q.includes('зачет') || q.includes('экзамен')) {
+  if (
+    q.includes('оценк') ||
+    q.includes('брс') ||
+    q.includes('балл') ||
+    q.includes('зачет') ||
+    q.includes('экзамен') ||
+    q.includes('успеваем') ||
+    q.includes('сесси')
+  ) {
     if (gradesSubjects.length === 0) {
       lines.push(
-        `\n**БРС и оценки:** Таблица дисциплин во вкладке **«ОЦЕНКИ (БРС)»** пока пуста. Добавьте предметы для автоматического расчёта текущего рейтинга и прогноза автомата.`
+        `\n**БРС и оценки:** Таблица дисциплин во вкладке **«ОЦЕНКИ (БРС)»** пока пуста. Добавьте предметы или синхронизируйте их с расписанием.`
       );
     } else {
       lines.push(`\n**Сводка успеваемости БРС (предметов: ${gradesSubjects.length}):**`);
       for (const sub of gradesSubjects) {
-        lines.push(`• **${sub.name}** (${sub.assessmentType === 'EXAM' ? 'Экзамен' : 'Зачёт'})`);
+        const cur = Number(sub.currentScore) || 0;
+        const max = Number(sub.maxScore) || 100;
+        const target = Array.isArray(sub.scale)
+          ? sub.scale.find((th: any) => th.id === sub.targetScaleId)
+          : null;
+        const deficit = target ? Math.max(0, Number(target.minScore) - cur) : 0;
+        lines.push(
+          `• **${sub.name || 'Дисциплина'}**${
+            sub.teacherName ? ` (${sub.teacherName})` : ''
+          }: **${cur} / ${max} б.**${
+            target
+              ? deficit > 0
+                ? ` → цель «${target.label}» (нужно ещё ${deficit} б.)`
+                : ` → цель «${target.label}» достигнута`
+              : ''
+          }`
+        );
       }
     }
   }
@@ -349,19 +414,17 @@ export function answerSiteQAClientFallback(params: {
     lines.push(`\n**Анализ прикреплённых сайтов (${selectedSites.length}):**`);
     for (const s of selectedSites) {
       const words = s.writtenContent?.wordCount || 0;
-      const overview = s.writtenContent?.overview || s.contentSnippet || 'Описание ожидает индексации';
-      lines.push(`• **${s.title}** (${s.url}) — статус: \`${s.status}\`, объём текста: ~${words} слов. Сводка: ${overview}`);
+      const overview =
+        s.writtenContent?.overview || s.contentSnippet || 'Описание ожидает индексации';
+      lines.push(
+        `• **${s.title}** (${s.url}) — статус: \`${s.status}\`, объём текста: ~${words} слов. Сводка: ${overview}`
+      );
     }
-  } else {
-    lines.push(`\n*Примечание: Выберите галочками один или несколько сайтов слева для детального разбора их текстового снимка.*`);
   }
 
   return lines.join('\n');
 }
 
-/**
- * Client-side database recommendation fallback for TabScience on GitHub Pages.
- */
 export function findDatabasesClientFallback(query: string) {
   const cleanQuery = query.trim();
   return {
@@ -390,20 +453,25 @@ export function findDatabasesClientFallback(query: string) {
         discipline: 'Международные журналы открытого доступа (Open Access)',
         accessType: 'Бесплатный полнотекстовый доступ',
         description: `Международные рецензируемые статьи по теме «${cleanQuery}» для историографического обзора и курсовой работы.`,
-        searchTips: `Скопируйте аннотацию найденной статьи во вкладку «ПЕРЕВОДЧИК» или «БИБЛИОТЕКА» для параллельного перевода.`
+        searchTips: `Скопируйте аннотацию найденной статьи во вкладку «БИБЛИОТЕКА» для параллельного перевода.`
       }
     ],
     methodologyAdvice: `Для подготовки качественной работы по теме «${cleanQuery}» рекомендуем сначала собрать 5–7 базовых статей в КиберЛенинке, изучить списки литературы в конце этих статей, а затем дополнить обзор 2–3 зарубежными источниками из DOAJ или JSTOR Open Access.`
   };
 }
 
-// Cached singleton Tesseract worker for fast schedule recognition on GitHub Pages
+// ============================================================================
+// HYBRID SCHEDULE RECOGNITION ENGINE FOR GITHUB PAGES
+// Stage 1: Cloud Multimodal Vision / Text AI Gateway (CORS-enabled)
+// Stage 2: Deterministic HTML Table DOM Parser (for URLs) & TSV Table Parser (for Text)
+// Stage 3: Continuous-Line Canvas Grid Detector + Row-Grouped Russian OCR
+// ============================================================================
+
 let cachedScheduleWorkerPromise: Promise<any> | null = null;
 let scheduleProgressCallback: ((stage: string, percent: number) => void) | null = null;
 
 /**
- * Pre-warms the Russian Tesseract OCR worker in the background so that when the user clicks
- * "РАСПОЗНАТЬ РАСПИСАНИЕ", 0ms is wasted downloading WASM or language traineddata.
+ * Pre-warms the Russian Tesseract OCR worker in the background.
  */
 export function prewarmScheduleOcrWorker(): Promise<any> {
   if (typeof window === 'undefined') return Promise.resolve(null);
@@ -413,11 +481,11 @@ export function prewarmScheduleOcrWorker(): Promise<any> {
         if (scheduleProgressCallback && typeof m?.progress === 'number') {
           const status = String(m.status || '');
           if (status.includes('loading') || status.includes('initializing')) {
-            scheduleProgressCallback('Загрузка OCR-ядра...', Math.round(m.progress * 35));
+            scheduleProgressCallback('Загрузка локального OCR-ядра...', Math.round(m.progress * 30));
           } else if (status.includes('recognizing')) {
             scheduleProgressCallback(
-              'Распознавание ячеек таблицы...',
-              35 + Math.round(m.progress * 55)
+              'Локальное распознавание ячеек таблицы...',
+              40 + Math.round(m.progress * 48)
             );
           }
         }
@@ -430,23 +498,6 @@ export function prewarmScheduleOcrWorker(): Promise<any> {
   return cachedScheduleWorkerPromise;
 }
 
-interface MergedCellSlot {
-  col: number;
-  rStart: number;
-  rEnd: number;
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-  stripIndex: number;
-  stripY0: number;
-  stripY1: number;
-  text: string;
-}
-
-/**
- * Loads a base64 / data URL into an HTMLImageElement.
- */
 function loadHtmlImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -458,60 +509,87 @@ function loadHtmlImage(src: string): Promise<HTMLImageElement> {
 }
 
 /**
- * Clusters sorted 1D coordinates that are within `maxGap` pixels of each other.
+ * Compresses a base64 image into a crisp JPEG (max 1650px) for fast cloud vision API transmission.
  */
-function cluster1D(coords: number[], maxGap = 4): number[] {
-  if (coords.length === 0) return [];
-  const sorted = [...coords].sort((a, b) => a - b);
-  const clusters: number[][] = [[sorted[0]]];
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = clusters[clusters.length - 1];
-    if (sorted[i] - prev[prev.length - 1] <= maxGap) {
-      prev.push(sorted[i]);
-    } else {
-      clusters.push([sorted[i]]);
+async function createCompactVisionDataUrl(imageBase64: string): Promise<string> {
+  if (typeof document === 'undefined') return imageBase64;
+  try {
+    const img = await loadHtmlImage(imageBase64);
+    const maxDim = 1650;
+    let w = img.naturalWidth || img.width;
+    let h = img.naturalHeight || img.height;
+    if (w > maxDim || h > maxDim) {
+      const ratio = Math.min(maxDim / w, maxDim / h);
+      w = Math.round(w * ratio);
+      h = Math.round(h * ratio);
     }
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return imageBase64;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', 0.88);
+  } catch {
+    return imageBase64;
   }
-  return clusters.map((c) => Math.round(c.reduce((a, b) => a + b, 0) / c.length));
 }
 
 /**
- * Checks if a pixel at (x, y) is a neutral dark/gray table border pixel.
+ * Dictionary and regex post-processor for Russian academic schedule OCR text.
+ * Fixes common Cyrillic character confusions in subject titles, teacher names, and notes.
  */
-function isBorderPixel(data: Uint8ClampedArray, w: number, x: number, y: number): boolean {
-  const idx = (y * w + x) * 4;
-  const r = data[idx];
-  const g = data[idx + 1];
-  const b = data[idx + 2];
-  const maxC = Math.max(r, g, b);
-  const minC = Math.min(r, g, b);
-  // Table borders are gray/black lines (low saturation, luminance < 200)
-  return maxC < 202 && maxC - minC < 45;
-}
-
-/**
- * Cleans OCR errors in Russian academic subject names, teacher names, and schedule comments.
- */
-function cleanScheduleOcrText(raw: string): string {
-  return raw
-    .replace(/[|¦[\]{}]/g, ' ')
+export function cleanScheduleOcrText(raw: string): string {
+  if (!raw) return '';
+  let s = raw
+    .replace(/[|¦[\]{}~^«»"]/g, ' ')
     .replace(/\s+/g, ' ')
-    .replace(/\(\s*лек\s*[.,/]?\s*пр\s*[.,]?\s*\)/gi, '(лек./пр.)')
-    .replace(/\(\s*л[ес]к\s*[.,]?\s*\)/gi, '(лек.)')
+    .replace(/\(\s*л[есэ]к\s*[.,/]?\s*[пи]р\s*[.,]?\s*\)/gi, '(лек./пр.)')
+    .replace(/\(\s*л[есэ]к\s*[.,]?\s*\)/gi, '(лек.)')
     .replace(/\(\s*[пи]р\s*[.,]?\s*\)/gi, '(пр.)')
-    .replace(/\(\s*лаб\s*[.,]?\s*\)/gi, '(лаб.)')
-    .replace(/Первобыт[пн]ое/gi, 'Первобытное')
-    .replace(/И[пн]остра[пн]{1,2}ый/gi, 'Иностранный')
-    .replace(/государстве[пн]{1,2}ости/gi, 'государственности')
-    .replace(/поз[пн]а[пн]ия/gi, 'познания')
-    .replace(/дисципли[пн]ы/gi, 'дисциплины')
-    .replace(/география/gi, 'география')
+    .replace(/\(\s*ла[б6]\s*[.,]?\s*\)/gi, '(лаб.)')
+    .replace(/\(\s*с[еэ]м\s*[.,]?\s*\)/gi, '(сем.)')
+    // Common subject OCR corrections
+    .replace(/Физ[ий]ч[ес]ская\s+культура\s+[ий]\s+спорт/gi, 'Физическая культура и спорт')
+    .replace(/Перво[б6]ыт[пн]ое\s+о[б6]щество/gi, 'Первобытное общество')
+    .replace(/Перво[б6]ыт[пн]ое/gi, 'Первобытное')
+    .replace(/о[б6]щество/gi, 'общество')
+    .replace(/Ос[пн]овы\s+[ий]стор[ий]ческого\s+поз[пн]а[пн][ий]я/gi, 'Основы исторического познания')
+    .replace(/Ос[пн]овы\s+росс[ий]йской\s+государстве[пн]{1,2}ост[ий]/gi, 'Основы российской государственности')
+    .replace(/Ос[пн]овы\s+проект[пн]ой\s+деятель[пн]ост[ий]/gi, 'Основы проектной деятельности')
+    .replace(/Класс[ий]ческ[ий]е\s+язык[ий]/gi, 'Классические языки')
+    .replace(/И[пн]остра[пн]{1,2}ый\s+язык/gi, 'Иностранный язык')
+    .replace(/Вспомогатель[пн]ые\s+[ий]стор[ий]ческ[ий]е\s+д[ий]сц[ий]пл[ий][пн]ы/gi, 'Вспомогательные исторические дисциплины')
+    .replace(/[ий]стор[ий]ческая\s+географ[ий]я/gi, 'историческая география')
+    .replace(/Пс[ий]холог[ий]я/gi, 'Психология')
+    .replace(/Правоведе[пн][ий]е/gi, 'Правоведение')
+    // Common teacher OCR corrections
+    .replace(/Еф[ий]мова\s+Еле[пн]а\s+Вас[ий]льев[пн]а/gi, 'Ефимова Елена Васильевна')
+    .replace(/Самойлов\s+К[ий]р[ий]лл\s+Гле[б6]ов[ий]ч/gi, 'Самойлов Кирилл Глебович')
+    .replace(/Ве[б6]ер\s+Дм[ий]тр[ий]й\s+Ива[пн]ов[ий]ч/gi, 'Вебер Дмитрий Иванович')
+    .replace(/Кар[пн]ач[её]в\s*А\.?\s*Е\.?/gi, 'Карначёв А. Е.')
+    .replace(/Розе\s+Еле[пн]а\s+Евге[пн]ьев[пн]а/gi, 'Розе Елена Евгеньевна')
+    .replace(/Барышева\s+А[пн]гел[ий][пн]а\s+Алексеев[пн]а/gi, 'Барышева Ангелина Алексеевна')
+    .replace(/Ш[ий]рокова\s+Ольга\s+Влад[ий]м[ий]ров[пн]а/gi, 'Широкова Ольга Владимировна')
+    .replace(/Клейме[пн]ов\s*В\.?\s*И\.?/gi, 'Клейменов В. И.')
+    .replace(/Гадж[ий][б6]а[б6]аева\s+Джавга[пн]ат\s+Раж[ий]д[ий][пн]ов[пн]а/gi, 'Гаджибабаева Джавганат Ражидиновна')
+    .replace(/Вов[ий][пн]\s+Алексей\s+Алекса[пн]дров[ий]ч/gi, 'Вовин Алексей Александрович')
+    .replace(/А[б6]дул[ий][пн]а\s+Вале[пн]т[ий][пн]а\s+М[ий]хайлов[пн]а/gi, 'Абдулина Валентина Михайловна')
+    .replace(/Савельев\s+Алексей\s+Сергеев[ий]ч/gi, 'Савельев Алексей Сергеевич')
+    // Common comment & location corrections
     .replace(/верх[пн]ей/gi, 'верхней')
     .replace(/[пн]иж[пн]ей/gi, 'нижней')
     .replace(/[пн]едел[ие]/gi, (m) => (m.toLowerCase().endsWith('е') ? 'неделе' : 'недели'))
-    .replace(/А[пн]то[пн]ово/gi, 'Антоново')
+    .replace(/ИГУМ\s*[,.\s]*А[пн]то[пн]ово/gi, 'ИГУМ, Антоново')
     .replace(/Спорт\s*зал/gi, 'Спортзал')
+    .replace(/\(\s*а[пн]гл\.?\s*яз\.?\s*\)/gi, '(англ. яз.)')
+    .replace(/\(\s*[пн]ем\.?\s*яз\.?\s*\)/gi, '(нем. яз.)')
+    .replace(/образователь[пн]ых\s+тех[пн]олог[ий]й\s*\(\s*ДОТ\s*\)/gi, 'образовательных технологий (ДОТ)')
     .trim();
+
+  return s;
 }
 
 /**
@@ -524,20 +602,25 @@ function parseTimeCell(rawTime: string): {
 } | null {
   if (!rawTime) return null;
 
-  // Normalize common OCR digit confusions inside time cells
   const norm = rawTime
     .replace(/[Зз]/g, '3')
-    .replace(/[ОоOo]/g, '0')
+    .replace(/[ОоOoQ]/g, '0')
     .replace(/[Бб]/g, '6')
     .replace(/[Вв]/g, '8')
-    .replace(/[ІіI|l]/g, '1')
-    .replace(/(\d{1,2})[.,;](\d{2})/g, '$1:$2');
+    .replace(/[ІіI|l!]/g, '1')
+    .replace(/(\d{1,2})\s*[:.,;-]\s*(\d{2})/g, '$1:$2');
 
   const matches = norm.match(/\b([0-2]?\d):([0-5]\d)\b/g);
   if (!matches || matches.length === 0) {
-    // Also check bare hours like "8 00" or "10 00"
     const spacedMatches = norm.match(/\b([789]|1\d|2[0-2])\s+00\b/g);
-    if (!spacedMatches || spacedMatches.length === 0) return null;
+    if (!spacedMatches || spacedMatches.length === 0) {
+      // Check bare hour numbers on separate lines like "10" "11" "12"
+      const bareHours = norm.match(/\b(8|9|10|11|12|13|14|15|16|17|18|19)\b/g);
+      if (bareHours && bareHours.length > 0) {
+        return buildTimeSlotFromTokens(bareHours.map((h) => `${h}:00`));
+      }
+      return null;
+    }
     const formatted = spacedMatches.map((m) => m.replace(/\s+/, ':'));
     return buildTimeSlotFromTokens(formatted);
   }
@@ -552,7 +635,7 @@ function buildTimeSlotFromTokens(tokens: string[]): {
 } {
   const pad = (t: string) => {
     const [h, m] = t.split(':').map((x) => Number(x) || 0);
-    const clampedH = h < 7 ? h + 10 : h;
+    const clampedH = h < 7 ? h + 10 : h > 22 ? 18 : h;
     return `${String(clampedH).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
   };
 
@@ -563,7 +646,7 @@ function buildTimeSlotFromTokens(tokens: string[]): {
     endTime = pad(tokens[tokens.length - 1]);
   } else {
     const [sh, sm] = startTime.split(':').map(Number);
-    const totalEnd = sh * 60 + sm + 90;
+    const totalEnd = sh * 60 + sm + 60;
     const eh = Math.floor(totalEnd / 60);
     const em = totalEnd % 60;
     endTime = `${String(eh).padStart(2, '0')}:${String(em).padStart(2, '0')}`;
@@ -581,25 +664,689 @@ function buildTimeSlotFromTokens(tokens: string[]): {
   return { startTime, endTime, lessonNumber };
 }
 
-/**
- * Parses day of week from Column 0 (`дата`) text.
- */
 function parseDayCell(rawDay: string): DayOfWeek | null {
   const s = rawDay.replace(/[^A-Za-zА-Яа-яЁё0-9]/g, '').toLowerCase();
   if (!s) return null;
-  if (/^(пн|пи|11н|mon|понед)/i.test(s)) return 'MON';
+  if (/^(пн|пи|пм|11н|mon|понед)/i.test(s)) return 'MON';
   if (/^(вт|8т|бт|вг|tue|втор)/i.test(s)) return 'TUE';
-  if (/^(ср|cp|wed|сред)/i.test(s)) return 'WED';
+  if (/^(ср|cp|cр|сp|wed|сред)/i.test(s)) return 'WED';
   if (/^(чт|4т|ут|чг|thu|четв)/i.test(s)) return 'THU';
   if (/^(пт|пг|11т|fri|пятн)/i.test(s)) return 'FRI';
-  if (/^(сб|с6|cб|c6|sat|субб)/i.test(s)) return 'SAT';
+  if (/^(сб|с6|cб|c6|со|sat|субб)/i.test(s)) return 'SAT';
   return null;
 }
 
 /**
- * Detects a 5-to-7 column schedule table grid on Canvas, extracts and upscales non-empty cells
- * (removing grid lines and blue link underlines), runs a fast single-column OCR pass, and reconstructs
- * every schedule row accurately.
+ * Normalizes and validates raw AI/OCR schedule classes into clean ScheduleClass items.
+ */
+function normalizeParsedScheduleList(rawList: any[], prefix = 'ghp'): ScheduleClass[] {
+  if (!Array.isArray(rawList)) return [];
+  const validDays = new Set<DayOfWeek>(['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']);
+  const validParities = new Set<WeekParityType>(['UPPER', 'LOWER', 'BOTH']);
+  const validTypes = new Set<LessonType>([
+    'LECTURE',
+    'SEMINAR',
+    'PRACTICE',
+    'LAB',
+    'EXAM',
+    'COLLOQUIUM',
+    'OTHER'
+  ]);
+
+  const result: ScheduleClass[] = [];
+
+  for (let i = 0; i < rawList.length; i++) {
+    const c = rawList[i];
+    if (!c || typeof c !== 'object') continue;
+
+    const rawSubject = cleanScheduleOcrText(String(c.subject || ''));
+    if (!rawSubject || rawSubject.length < 2 || /^предмет$/i.test(rawSubject)) continue;
+
+    let day: DayOfWeek = 'MON';
+    if (validDays.has(c.day)) {
+      day = c.day;
+    } else {
+      const parsedD = parseDayCell(String(c.day || ''));
+      if (parsedD) day = parsedD;
+    }
+
+    let lessonType: LessonType = validTypes.has(c.lessonType) ? c.lessonType : 'SEMINAR';
+    if (/\(\s*лек\s*[./]?\s*пр/i.test(rawSubject)) {
+      lessonType = 'LECTURE';
+    } else if (/\(\s*лек/i.test(rawSubject) || /\bлекц/i.test(rawSubject)) {
+      lessonType = 'LECTURE';
+    } else if (/\(\s*пр/i.test(rawSubject) || /\bпракт/i.test(rawSubject)) {
+      lessonType = 'PRACTICE';
+    } else if (/\(\s*лаб/i.test(rawSubject) || /\bлаб/i.test(rawSubject)) {
+      lessonType = 'LAB';
+    }
+
+    const hasCombinedLecPr = /\(\s*лек\s*[./]?\s*пр/i.test(rawSubject);
+    let cleanSubj = rawSubject
+      .replace(/^\(\s*лек\s*[./]?\s*пр\s*[.)]*\s*/i, '')
+      .replace(/^\(\s*(?:лек|пр|лаб|сем)\s*[.)]*\s*/i, '')
+      .replace(/^[-–—:•.\s]+/, '')
+      .trim();
+
+    if (hasCombinedLecPr && !cleanSubj.includes('(лек./пр.)')) {
+      cleanSubj = `${cleanSubj} (лек./пр.)`;
+    }
+
+    const parsedTime = parseTimeCell(`${c.startTime || ''} ${c.endTime || ''}`);
+    const startTime = parsedTime ? parsedTime.startTime : '09:00';
+    const endTime = parsedTime ? parsedTime.endTime : '10:30';
+    const lessonNumber = Number(c.lessonNumber) || (parsedTime ? parsedTime.lessonNumber : 1);
+
+    const cleanNotes = cleanScheduleOcrText(String(c.notes || '')).replace(
+      /^[.,\-–—\s]+|[.,\-–—\s]+$/g,
+      ''
+    );
+
+    let weekParity: WeekParityType = validParities.has(c.weekParity) ? c.weekParity : 'BOTH';
+    if (weekParity === 'BOTH') {
+      if (/верхн|нечет|числит/i.test(cleanNotes)) weekParity = 'UPPER';
+      else if (/нижн|четн|знамен/i.test(cleanNotes)) weekParity = 'LOWER';
+    }
+
+    const derivedRange = extractWeekRangeFromText(`${cleanNotes} ${cleanSubj}`);
+    const weekFrom =
+      c.weekFrom !== undefined && c.weekFrom !== null && c.weekFrom !== ''
+        ? Number(c.weekFrom)
+        : derivedRange.weekFrom;
+    const weekTo =
+      c.weekTo !== undefined && c.weekTo !== null && c.weekTo !== ''
+        ? Number(c.weekTo)
+        : derivedRange.weekTo;
+
+    const weekRangeLabel =
+      c.weekRangeLabel ||
+      derivedRange.weekRangeLabel ||
+      (weekFrom && weekTo
+        ? `${weekFrom}–${weekTo} нед.`
+        : weekTo
+        ? `до ${weekTo} нед.`
+        : weekFrom
+        ? `после ${weekFrom - 1} нед.`
+        : undefined);
+
+    const rawSubgroup = c.subgroup
+      ? String(c.subgroup)
+          .replace(/[Зз]/g, '3')
+          .replace(/[ІіI|l]/g, '1')
+          .replace(/[^1-4]/g, '')
+      : '';
+
+    let cleanRoom = cleanScheduleOcrText(String(c.classroom || ''))
+      .replace(/^[.,\-–—\s]+|[.,\-–—\s]+$/g, '')
+      .replace(/[Зз](?=\d)/g, '3')
+      .replace(/[ОоOo](?=\d)/g, '0')
+      .replace(/(?<=\d)[ОоOo]/g, '0')
+      .replace(/[ІіI|l](?=\d)/g, '1')
+      .trim();
+
+    if ((!cleanRoom || cleanRoom.length <= 1) && /ДОТ|дистанц|portal\.novsu/i.test(cleanNotes)) {
+      cleanRoom = 'ДОТ';
+    }
+
+    const cleanTeacher = cleanScheduleOcrText(String(c.teacher || ''))
+      .replace(/^[.,\-–—\s]+|[.,\-–—\s]+$/g, '')
+      .trim();
+
+    const urlMatch = cleanNotes.match(/https?:\/\/[^\s,]+/i);
+
+    result.push({
+      id: `${prefix}-${Date.now()}-${result.length}`,
+      day,
+      weekParity,
+      lessonNumber,
+      startTime,
+      endTime,
+      subject: cleanSubj.slice(0, 130),
+      lessonType,
+      subgroup: rawSubgroup || undefined,
+      weekFrom: weekFrom && !isNaN(weekFrom) ? weekFrom : undefined,
+      weekTo: weekTo && !isNaN(weekTo) ? weekTo : undefined,
+      weekRangeLabel: weekRangeLabel || undefined,
+      classroom: cleanRoom || undefined,
+      teacher: cleanTeacher || undefined,
+      notes: cleanNotes || undefined,
+      linkUrl: c.linkUrl || (urlMatch ? urlMatch[0] : undefined),
+      notificationEnabled: true
+    });
+  }
+
+  return result;
+}
+
+/**
+ * STAGE 1: Cloud Multimodal Vision / Text AI Gateway for GitHub Pages.
+ * Calls a CORS-enabled OpenAI-compatible multimodal endpoint so screenshots and text
+ * are parsed by a Vision LLM even on static GitHub Pages without a backend server.
+ */
+async function tryCloudMultimodalScheduleParse(params: {
+  imageBase64?: string;
+  text?: string;
+  onProgress?: (stage: string, percent: number) => void;
+}): Promise<{ classes: ScheduleClass[]; summary: string } | null> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return null;
+  }
+
+  params.onProgress?.('Мультимодальный ИИ-анализ расписания...', 18);
+
+  const systemPrompt = `Ты точный анализатор университетских таблиц расписания (7 колонок: дата | время | подгр. | предмет | преподаватель | ауд. | комм.).
+Верни ТОЛЬКО валидный JSON объект формата:
+{
+  "summary": "краткая сводка на русском",
+  "classes": [
+    {
+      "day": "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT",
+      "weekParity": "UPPER" | "LOWER" | "BOTH",
+      "lessonNumber": 1..6,
+      "startTime": "HH:MM",
+      "endTime": "HH:MM",
+      "subgroup": "1" | "2" | "3" | "",
+      "subject": "Название предмета без префикса (лек.)/(пр.)",
+      "lessonType": "LECTURE" | "PRACTICE" | "LAB" | "SEMINAR",
+      "teacher": "ФИО преподавателя",
+      "classroom": "номер аудитории или Спортзал или ДОТ",
+      "weekFrom": число или null (10 если "после 9 недели"),
+      "weekTo": число или null (9 если "до 9 недели"),
+      "notes": "текст колонки комм."
+    }
+  ]
+}
+Правила:
+1. Если ячейка дня недели (Пн..Сб) или времени (например, 13:00 14:00 или 16:00 17:00) объединена по вертикали на несколько строк, продублируй этот день и время для КАЖДОЙ вложенной строки.
+2. Если время записано в столбик (8:00 и 9:00; или 10:00, 11:00, 12:00), первая строка — startTime, последняя — endTime (10:00 и 12:00). Если одно время (14:00) — endTime на 1 час позже (15:00).
+3. Извлекай ВСЕ подгруппы (1), 2), 3)) и ВСЕ варианты недель ("по верхней неделе" -> UPPER, "по нижней неделе" -> LOWER, "до 9 недели" -> weekTo: 9, "после 9 недели" -> weekFrom: 10).`;
+
+  const userContent: any[] = [];
+  if (params.text) {
+    userContent.push({
+      type: 'text',
+      text: `Извлеки все строки расписания из текста/таблицы:\n${params.text.slice(0, 18000)}`
+    });
+  } else {
+    userContent.push({
+      type: 'text',
+      text: 'Извлеки абсолютно все строки из этой таблицы расписания в JSON.'
+    });
+  }
+
+  if (params.imageBase64) {
+    const compactDataUrl = await createCompactVisionDataUrl(params.imageBase64);
+    userContent.push({
+      type: 'image_url',
+      image_url: { url: compactDataUrl }
+    });
+  }
+
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(() => ctrl.abort(), 16000);
+
+  try {
+    const res = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        model: 'openai',
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent }
+        ]
+      })
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    const rawContent = data?.choices?.[0]?.message?.content;
+    if (typeof rawContent !== 'string' || !rawContent.trim()) return null;
+
+    const cleanJson = rawContent
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/```\s*$/, '')
+      .trim();
+
+    const parsed = JSON.parse(cleanJson);
+    const rawClasses = Array.isArray(parsed) ? parsed : parsed?.classes;
+    if (!Array.isArray(rawClasses) || rawClasses.length === 0) return null;
+
+    const normalized = normalizeParsedScheduleList(rawClasses, 'cloud-ai');
+    if (normalized.length < 2) return null;
+
+    return {
+      classes: normalized,
+      summary:
+        parsed?.summary ||
+        `Мультимодальный ИИ распознал ${normalized.length} занятий (дней: ${
+          new Set(normalized.map((c) => c.day)).size
+        }). Проверьте таблицу предпросмотра перед сохранением.`
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * STAGE 2A: Deterministic DOM HTML Table Parser (for schedule URLs or pasted HTML).
+ * Handles rowspan and colspan natively with 100% character precision.
+ */
+function parseScheduleFromHtmlDom(html: string): ScheduleClass[] | null {
+  if (typeof DOMParser === 'undefined' || !/<table/i.test(html)) return null;
+
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const tables = Array.from(doc.querySelectorAll('table'));
+  if (tables.length === 0) return null;
+
+  for (const table of tables) {
+    const trs = Array.from(table.querySelectorAll('tr'));
+    if (trs.length < 3) continue;
+
+    // Expand table into a 2D string grid respecting rowspan and colspan
+    const grid: string[][] = [];
+    for (let r = 0; r < trs.length; r++) {
+      if (!grid[r]) grid[r] = [];
+      const cells = Array.from(trs[r].querySelectorAll('th, td'));
+      let cIdx = 0;
+      for (const cell of cells) {
+        while (grid[r][cIdx] !== undefined) cIdx++;
+        const rowspan = Math.max(1, Number(cell.getAttribute('rowspan')) || 1);
+        const colspan = Math.max(1, Number(cell.getAttribute('colspan')) || 1);
+
+        // Preserve link href if cell has an <a href="http...">
+        const linkEl = cell.querySelector('a[href^="http"]');
+        let cellText = (cell.textContent || '').replace(/\s+/g, ' ').trim();
+        if (linkEl && !cellText.includes('http')) {
+          cellText = `${cellText} ${linkEl.getAttribute('href')}`.trim();
+        }
+
+        for (let dr = 0; dr < rowspan; dr++) {
+          for (let dc = 0; dc < colspan; dc++) {
+            if (!grid[r + dr]) grid[r + dr] = [];
+            grid[r + dr][cIdx + dc] = cellText;
+          }
+        }
+        cIdx += colspan;
+      }
+    }
+
+    const extracted = convert2DStringGridToSchedule(grid);
+    if (extracted.length >= 2) {
+      return extracted;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Converts a 2D string matrix (from HTML DOM table, TSV paste, or Canvas OCR grid) into ScheduleClass[].
+ */
+function convert2DStringGridToSchedule(grid: string[][]): ScheduleClass[] {
+  if (grid.length < 2) return [];
+  const maxCols = Math.max(...grid.map((r) => r.length));
+  if (maxCols < 4) return [];
+
+  // Check if row 0 is header ("дата | время | подгр. | предмет...")
+  const row0Joined = (grid[0] || []).join(' ').toLowerCase();
+  const startRow = /дата|время|предмет|преподаватель|дисциплин/i.test(row0Joined) ? 1 : 0;
+  const is7Col = maxCols >= 7;
+
+  let currentDay: DayOfWeek = 'MON';
+  let currentTime = { startTime: '09:00', endTime: '10:30', lessonNumber: 1 };
+  const rawObjects: any[] = [];
+
+  for (let r = startRow; r < grid.length; r++) {
+    const row = grid[r] || [];
+    if (row.every((cell) => !cell || !cell.trim())) continue;
+
+    const dCandidate = parseDayCell(row[0] || '');
+    if (dCandidate) currentDay = dCandidate;
+
+    const tCandidate = parseTimeCell(row[1] || '');
+    if (tCandidate) currentTime = tCandidate;
+
+    const subgroup = is7Col ? row[2] || '' : '';
+    const subject = is7Col ? row[3] || '' : row[2] || '';
+    const teacher = is7Col ? row[4] || '' : row[3] || '';
+    const classroom = is7Col ? row[5] || '' : row[4] || '';
+    const notes = is7Col ? row.slice(6).join(' ') : row.slice(5).join(' ');
+
+    if (!subject || subject.trim().length < 2) continue;
+
+    rawObjects.push({
+      day: currentDay,
+      startTime: currentTime.startTime,
+      endTime: currentTime.endTime,
+      lessonNumber: currentTime.lessonNumber,
+      subgroup,
+      subject,
+      teacher,
+      classroom,
+      notes
+    });
+  }
+
+  return normalizeParsedScheduleList(rawObjects, 'dom-tbl');
+}
+
+/**
+ * STAGE 2B: Structured Tab-Separated (TSV) & Multi-line Text Parser for pasted schedules.
+ */
+function parseScheduleFromStructuredText(rawText: string): ScheduleClass[] {
+  const trimmed = rawText.trim();
+  if (!trimmed) return [];
+
+  // 1. If the user pasted HTML or TSV with tabs (`\t`) from a browser table selection
+  if (trimmed.includes('\t')) {
+    const rows = trimmed
+      .split(/\r?\n/)
+      .map((line) => line.split('\t').map((c) => c.trim()))
+      .filter((r) => r.some((c) => c.length > 0));
+
+    if (rows.length >= 2 && Math.max(...rows.map((r) => r.length)) >= 4) {
+      const fromTsv = convert2DStringGridToSchedule(rows);
+      if (fromTsv.length > 0) return fromTsv;
+    }
+  }
+
+  // 2. Line-by-line intelligent parser supporting NovSU / university text blocks
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((l) => cleanScheduleOcrText(l))
+    .filter((l) => l.length >= 2);
+
+  let currentDay: DayOfWeek = 'MON';
+  let currentParity: WeekParityType = 'BOTH';
+  let currentTime = { startTime: '09:00', endTime: '10:30', lessonNumber: 1 };
+  const rawObjects: any[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Standalone day header ("Пн", "Понедельник", etc.)
+    const dayOnly = parseDayCell(line);
+    if (dayOnly && line.length <= 14 && !/\d/.test(line)) {
+      currentDay = dayOnly;
+      continue;
+    }
+
+    // Check if line starts with a day token ("Пн 8:00 9:00 (лек.) ...")
+    const firstToken = line.split(/\s+/)[0] || '';
+    const leadingDay = parseDayCell(firstToken);
+    let restLine = line;
+    if (leadingDay && firstToken.length <= 4) {
+      currentDay = leadingDay;
+      restLine = line.slice(firstToken.length).trim();
+    }
+
+    // Check if line is just a time token ("8:00", "10:00 11:00 12:00")
+    const timeOnly = parseTimeCell(restLine);
+    if (
+      timeOnly &&
+      restLine.replace(/[\d:.\s-–—]/g, '').length <= 2
+    ) {
+      currentTime = timeOnly;
+      continue;
+    }
+
+    if (/^(верхняя|нечетная)\s*неделя/i.test(restLine) && restLine.length < 25) {
+      currentParity = 'UPPER';
+      continue;
+    }
+    if (/^(нижняя|четная)\s*неделя/i.test(restLine) && restLine.length < 25) {
+      currentParity = 'LOWER';
+      continue;
+    }
+
+    // Check if line contains a subject or time + subject
+    const inlineTime = parseTimeCell(restLine);
+    if (inlineTime) {
+      currentTime = inlineTime;
+    }
+
+    const hasLessonMarker = /\((?:лек\.?\/?пр\.?|лек\.?|пр\.?|лаб\.?|сем\.?)\)/i.test(restLine);
+    if (inlineTime || hasLessonMarker || restLine.length >= 12) {
+      // Remove leading time tokens and subgroup prefix ("1)", "2)", "3)")
+      let body = restLine
+        .replace(/^(?:\d{1,2}:\d{2}\s*[-–—]?\s*)+/, '')
+        .trim();
+
+      let subgroup = '';
+      const subMatch = body.match(/^([1-4])\s*\)\s*/);
+      if (subMatch) {
+        subgroup = subMatch[1];
+        body = body.slice(subMatch[0].length).trim();
+      }
+
+      if (!body || /^(дата|время|предмет|преподаватель)$/i.test(body)) continue;
+
+      // Extract teacher if pattern "Фамилия Имя Отчество" or "Фамилия И. О." appears
+      let teacher = '';
+      const teacherMatch = body.match(
+        /([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s+(?:[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+|[А-ЯЁ]\.\s*[А-ЯЁ]\.))/
+      );
+      if (teacherMatch) {
+        teacher = teacherMatch[1];
+      }
+
+      // Extract classroom ("1201", "1106", "1318", "1226", "115", "100", "Спортзал")
+      let classroom = '';
+      const roomMatch = body.match(/\b(Спортзал|\d{3,4}[а-я]?)\b/i);
+      if (roomMatch) {
+        classroom = roomMatch[1];
+      }
+
+      // Extract subject part (before teacher or room if present)
+      let subjectPart = body;
+      if (teacher && subjectPart.includes(teacher)) {
+        const idx = subjectPart.indexOf(teacher);
+        const afterTeacher = subjectPart.slice(idx + teacher.length).trim();
+        subjectPart = subjectPart.slice(0, idx).trim();
+        rawObjects.push({
+          day: currentDay,
+          weekParity: currentParity,
+          startTime: currentTime.startTime,
+          endTime: currentTime.endTime,
+          lessonNumber: currentTime.lessonNumber,
+          subgroup,
+          subject: subjectPart,
+          teacher,
+          classroom,
+          notes: afterTeacher
+        });
+        continue;
+      }
+
+      rawObjects.push({
+        day: currentDay,
+        weekParity: currentParity,
+        startTime: currentTime.startTime,
+        endTime: currentTime.endTime,
+        lessonNumber: currentTime.lessonNumber,
+        subgroup,
+        subject: subjectPart,
+        teacher,
+        classroom,
+        notes: body
+      });
+    }
+  }
+
+  return normalizeParsedScheduleList(rawObjects, 'txt-cls');
+}
+
+// ============================================================================
+// STAGE 3: CONTINUOUS-LINE TABLE GRID DETECTOR + ROW-GROUPED CANVAS OCR
+// ============================================================================
+
+interface MergedCellSlot {
+  col: number;
+  rStart: number;
+  rEnd: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  stripIndex: number;
+  stripY0: number;
+  stripY1: number;
+  text: string;
+}
+
+function cluster1D(coords: number[], maxGap = 4): number[] {
+  if (coords.length === 0) return [];
+  const sorted = [...coords].sort((a, b) => a - b);
+  const clusters: number[][] = [[sorted[0]]];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = clusters[clusters.length - 1];
+    if (sorted[i] - prev[prev.length - 1] <= maxGap) {
+      prev.push(sorted[i]);
+    } else {
+      clusters.push([sorted[i]]);
+    }
+  }
+  return clusters.map((c) => Math.round(c.reduce((a, b) => a + b, 0) / c.length));
+}
+
+function isBorderPixel(data: Uint8ClampedArray, w: number, x: number, y: number): boolean {
+  const idx = (y * w + x) * 4;
+  const r = data[idx];
+  const g = data[idx + 1];
+  const b = data[idx + 2];
+  const maxC = Math.max(r, g, b);
+  const minC = Math.min(r, g, b);
+  // Table borders are neutral gray/black lines (low saturation, luminance < 212)
+  return maxC < 212 && maxC - minC < 42;
+}
+
+/**
+ * Computes total pixels belonging to CONTINUOUS vertical line segments (>= minRunLen px) at column x.
+ * This completely eliminates false vertical lines caused by aligned text letters!
+ */
+function countContinuousVerticalLinePixels(
+  data: Uint8ClampedArray,
+  W: number,
+  x: number,
+  yStart: number,
+  yEnd: number,
+  minRunLen = 22
+): number {
+  let totalInLongRuns = 0;
+  let currentRun = 0;
+
+  for (let y = yStart; y <= yEnd; y++) {
+    const hit =
+      isBorderPixel(data, W, x, y) ||
+      (x > 0 && isBorderPixel(data, W, x - 1, y)) ||
+      (x + 1 < W && isBorderPixel(data, W, x + 1, y));
+
+    if (hit) {
+      currentRun++;
+    } else {
+      if (currentRun >= minRunLen) {
+        totalInLongRuns += currentRun;
+      }
+      currentRun = 0;
+    }
+  }
+  if (currentRun >= minRunLen) {
+    totalInLongRuns += currentRun;
+  }
+  return totalInLongRuns;
+}
+
+/**
+ * Computes total pixels belonging to CONTINUOUS horizontal line segments (>= minRunLen px) at row y.
+ */
+function countContinuousHorizontalLinePixels(
+  data: Uint8ClampedArray,
+  W: number,
+  H: number,
+  y: number,
+  xStart: number,
+  xEnd: number,
+  minRunLen = 36
+): number {
+  let totalInLongRuns = 0;
+  let currentRun = 0;
+
+  for (let x = xStart; x <= xEnd; x++) {
+    const hit =
+      isBorderPixel(data, W, x, y) ||
+      (y > 0 && isBorderPixel(data, W, x, y - 1)) ||
+      (y + 1 < H && isBorderPixel(data, W, x, y + 1));
+
+    if (hit) {
+      currentRun++;
+    } else {
+      if (currentRun >= minRunLen) {
+        totalInLongRuns += currentRun;
+      }
+      currentRun = 0;
+    }
+  }
+  if (currentRun >= minRunLen) {
+    totalInLongRuns += currentRun;
+  }
+  return totalInLongRuns;
+}
+
+/**
+ * Selects the canonical 8 vertical lines (7 columns: дата | время | подгр. | предмет | преподаватель | ауд. | комм.)
+ * if extra candidate lines were detected.
+ */
+function selectCanonicalVerticalLines(
+  candidates: Array<{ x: number; score: number }>,
+  W: number
+): number[] {
+  if (candidates.length <= 8) {
+    return candidates.map((c) => c.x).sort((a, b) => a - b);
+  }
+
+  // Sort by x to find outer left and outer right borders of the table
+  const byX = [...candidates].sort((a, b) => a.x - b.x);
+  const leftBorder = byX[0].x;
+  const rightBorder = byX[byX.length - 1].x;
+  const span = rightBorder - leftBorder;
+
+  if (span < W * 0.5) {
+    return byX.slice(0, 8).map((c) => c.x);
+  }
+
+  // Canonical relative positions of the 8 vertical borders in university 7-column schedule tables:
+  // 0.00 (left), ~0.036 (after дата), ~0.085 (after время), ~0.114 (after подгр.),
+  // ~0.295 (after предмет), ~0.415 (after преподаватель), ~0.478 (after ауд.), 1.00 (right)
+  const expectedRatios = [0.0, 0.036, 0.085, 0.114, 0.295, 0.415, 0.478, 1.0];
+  const chosen: number[] = [];
+
+  for (const ratio of expectedRatios) {
+    const targetX = leftBorder + span * ratio;
+    let best = byX[0];
+    let bestDist = Infinity;
+    for (const cand of byX) {
+      if (chosen.includes(cand.x)) continue;
+      const dist = Math.abs(cand.x - targetX) / span - (cand.score / 10000) * 0.02;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = cand;
+      }
+    }
+    chosen.push(best.x);
+  }
+
+  return chosen.sort((a, b) => a - b);
+}
+
+/**
+ * Local Canvas Table Grid + OCR recognizer for schedule screenshots on GitHub Pages.
  */
 async function recognizeScheduleTableFromImage(
   imageBase64: string,
@@ -607,7 +1354,7 @@ async function recognizeScheduleTableFromImage(
 ): Promise<ScheduleClass[] | null> {
   if (typeof document === 'undefined') return null;
 
-  onProgress?.('Анализ табличной сетки скриншота...', 10);
+  onProgress?.('Анализ табличной сетки скриншота...', 25);
   const img = await loadHtmlImage(imageBase64);
   const W = img.naturalWidth || img.width;
   const H = img.naturalHeight || img.height;
@@ -623,58 +1370,63 @@ async function recognizeScheduleTableFromImage(
   const imgData = rawCtx.getImageData(0, 0, W, H);
   const data = imgData.data;
 
-  // 1. Find vertical grid lines (columns)
-  const rawVLines: number[] = [];
+  // 1. Detect vertical grid lines using continuous vertical segment filtering
   const yScanStart = Math.round(H * 0.02);
   const yScanEnd = Math.round(H * 0.98);
-  const minVCount = Math.round((yScanEnd - yScanStart) * 0.38);
+  const minContinuousV = Math.round((yScanEnd - yScanStart) * 0.42);
+
+  const vScores = new Map<number, number>();
+  const rawVCoords: number[] = [];
 
   for (let x = 2; x < W - 2; x++) {
-    let count = 0;
-    for (let y = yScanStart; y < yScanEnd; y += 2) {
-      if (isBorderPixel(data, W, x, y)) count += 2;
-    }
-    if (count >= minVCount) {
-      rawVLines.push(x);
+    const score = countContinuousVerticalLinePixels(data, W, x, yScanStart, yScanEnd, 24);
+    if (score >= minContinuousV) {
+      rawVCoords.push(x);
+      vScores.set(x, score);
     }
   }
 
-  let xLines = cluster1D(rawVLines, 5);
-  // Filter out very close duplicate lines (< 14px apart)
-  xLines = xLines.reduce<number[]>((acc, x) => {
+  let clusteredV = cluster1D(rawVCoords, 5);
+  clusteredV = clusteredV.reduce<number[]>((acc, x) => {
     if (acc.length === 0 || x - acc[acc.length - 1] >= 14) {
       acc.push(x);
     }
     return acc;
   }, []);
 
-  if (xLines.length < 5) {
-    return null; // Not a structured multi-column grid table
+  if (clusteredV.length < 5) {
+    return null;
   }
+
+  const vWithScores = clusteredV.map((x) => ({
+    x,
+    score: vScores.get(x) || minContinuousV
+  }));
+  const xLines = selectCanonicalVerticalLines(vWithScores, W);
 
   const tableLeft = xLines[0];
   const tableRight = xLines[xLines.length - 1];
   const tableWidth = tableRight - tableLeft;
-  if (tableWidth < W * 0.5) return null;
+  if (tableWidth < W * 0.48) return null;
 
-  // 2. Find horizontal grid lines (rows) using the right 75% of the table
-  // (since left columns `дата` and `время` are often vertically merged via rowspan)
-  const hScanX0 = Math.min(tableRight - 20, xLines.length >= 4 ? xLines[3] : tableLeft + Math.round(tableWidth * 0.15));
+  // 2. Detect horizontal grid lines across the non-merged subject/teacher/comment columns
+  const hScanX0 = Math.min(
+    tableRight - 30,
+    xLines.length >= 4 ? xLines[3] : tableLeft + Math.round(tableWidth * 0.14)
+  );
   const hScanX1 = tableRight - 2;
-  const hScanSpan = Math.max(20, hScanX1 - hScanX0);
+  const hScanSpan = Math.max(30, hScanX1 - hScanX0);
+  const minContinuousH = Math.round(hScanSpan * 0.52);
 
-  const rawHLines: number[] = [];
+  const rawHCoords: number[] = [];
   for (let y = 2; y < H - 2; y++) {
-    let count = 0;
-    for (let x = hScanX0; x < hScanX1; x += 2) {
-      if (isBorderPixel(data, W, x, y)) count += 2;
-    }
-    if (count >= hScanSpan * 0.58) {
-      rawHLines.push(y);
+    const score = countContinuousHorizontalLinePixels(data, W, H, y, hScanX0, hScanX1, 35);
+    if (score >= minContinuousH) {
+      rawHCoords.push(y);
     }
   }
 
-  let yLines = cluster1D(rawHLines, 4);
+  let yLines = cluster1D(rawHCoords, 4);
   yLines = yLines.reduce<number[]>((acc, y) => {
     if (acc.length === 0 || y - acc[acc.length - 1] >= 14) {
       acc.push(y);
@@ -687,7 +1439,7 @@ async function recognizeScheduleTableFromImage(
   }
 
   const numRows = yLines.length - 1;
-  const numCols = Math.min(xLines.length - 1, 8);
+  const numCols = Math.min(xLines.length - 1, 7);
 
   // Helper: check if horizontal border exists at yLine `y` inside column `c`
   const hasHorizontalBorderInCol = (c: number, y: number): boolean => {
@@ -705,11 +1457,9 @@ async function recognizeScheduleTableFromImage(
         hits++;
       }
     }
-    return hits >= span * 0.52;
+    return hits >= span * 0.5;
   };
 
-  // Detect if Row 0 is the header row ("дата | время | подгр. | предмет...")
-  // Header row in NovSU schedule is ~22-36px tall at the very top of the table
   const firstRowHeight = yLines[1] - yLines[0];
   const startDataRow = firstRowHeight <= 42 && numRows >= 3 ? 1 : 0;
 
@@ -720,7 +1470,6 @@ async function recognizeScheduleTableFromImage(
     let r = startDataRow;
     while (r < numRows) {
       let rEnd = r;
-      // Only columns 0 (`дата`), 1 (`время`), and 2 (`подгр.`) can span multiple rows
       if (c <= 2) {
         while (rEnd + 1 < numRows && !hasHorizontalBorderInCol(c, yLines[rEnd + 1])) {
           rEnd++;
@@ -743,13 +1492,23 @@ async function recognizeScheduleTableFromImage(
     }
   }
 
-  onProgress?.('Увеличение чёткости мелкого шрифта (2.25x)...', 22);
+  // If Column 0 (`дата`) has 6 merged day blocks, assign MON..SAT immediately!
+  const col0Slots = mergedCells.filter((m) => m.col === 0);
+  const orderedDays: DayOfWeek[] = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+  const col0Preassigned = col0Slots.length === 6;
+  if (col0Preassigned) {
+    col0Slots.forEach((slot, idx) => {
+      slot.text = orderedDays[idx];
+    });
+  }
 
-  // 4. Crop, clean (remove blue link underlines & borders), and upscale non-empty cells onto vertical strip canvas(es)
-  const SCALE = 2.25;
-  const PAD_Y = 30;
-  const STRIP_W = 920;
-  const MAX_STRIP_H = 7200;
+  onProgress?.('Увеличение чёткости мелкого шрифта ячеек (2.4x)...', 34);
+
+  const SCALE = 2.4;
+  const PAD_Y = 34;
+  const STRIP_W = 960;
+  // Keep strip height <= 2600px so Tesseract WASM never degrades or misaligns Y coordinates
+  const MAX_STRIP_H = 2600;
 
   interface PreparedCellRender {
     slot: MergedCellSlot;
@@ -761,7 +1520,9 @@ async function recognizeScheduleTableFromImage(
   const preparedCells: PreparedCellRender[] = [];
 
   for (const slot of mergedCells) {
-    const insetX = Math.min(3, Math.floor((slot.x1 - slot.x0) * 0.1));
+    if (col0Preassigned && slot.col === 0) continue;
+
+    const insetX = Math.min(3, Math.floor((slot.x1 - slot.x0) * 0.08));
     const insetY = 2;
     const sx = slot.x0 + insetX;
     const sy = slot.y0 + insetY;
@@ -769,7 +1530,6 @@ async function recognizeScheduleTableFromImage(
     const sh = slot.y1 - slot.y0 - insetY * 2;
     if (sw <= 4 || sh <= 6) continue;
 
-    // Count dark/ink pixels to skip empty cells (like empty subgroup cells or empty room cells)
     let inkCount = 0;
     for (let y = sy; y < sy + sh; y++) {
       for (let x = sx; x < sx + sw; x++) {
@@ -777,15 +1537,13 @@ async function recognizeScheduleTableFromImage(
         const r = data[idx];
         const g = data[idx + 1];
         const b = data[idx + 2];
-        const ink = Math.min(r, g, Math.round(b * 0.75));
-        if (ink < 180) inkCount++;
+        const ink = Math.min(r, g, Math.round(b * 0.72));
+        if (ink < 182) inkCount++;
       }
     }
 
-    // Skip cells with no text or just a single "." placeholder
-    if (inkCount < 10) continue;
+    if (inkCount < 9) continue;
 
-    // Copy cell to a small 1x canvas and remove 1px horizontal blue link underlines
     const cell1x = document.createElement('canvas');
     cell1x.width = sw;
     cell1x.height = sh;
@@ -796,7 +1554,7 @@ async function recognizeScheduleTableFromImage(
     const cellImg = ctx1x.getImageData(0, 0, sw, sh);
     const cd = cellImg.data;
 
-    // Detect and erase 1px horizontal blue hyperlink underlines (common in teacher & classroom columns)
+    // Erase 1px horizontal blue hyperlink underlines
     for (let y = 1; y < sh - 1; y++) {
       let blueRun = 0;
       for (let x = 0; x < sw; x++) {
@@ -804,18 +1562,17 @@ async function recognizeScheduleTableFromImage(
         const r = cd[idx];
         const g = cd[idx + 1];
         const b = cd[idx + 2];
-        const isBlue = b > r + 18 && b > g + 10 && r < 160;
+        const isBlue = b > r + 18 && b > g + 10 && r < 165;
         if (isBlue) {
           blueRun++;
         } else {
-          if (blueRun >= 10) {
-            // Check if the row immediately below is mostly light background
+          if (blueRun >= 8) {
             let lightBelow = 0;
             for (let bx = x - blueRun; bx < x; bx++) {
               const bIdx = ((y + 1) * sw + bx) * 4;
-              if (cd[bIdx] > 180 && cd[bIdx + 1] > 180) lightBelow++;
+              if (cd[bIdx] > 175 && cd[bIdx + 1] > 175) lightBelow++;
             }
-            if (lightBelow >= blueRun * 0.7) {
+            if (lightBelow >= blueRun * 0.65) {
               for (let bx = x - blueRun; bx < x; bx++) {
                 const uIdx = (y * sw + bx) * 4;
                 cd[uIdx] = 255;
@@ -827,13 +1584,13 @@ async function recognizeScheduleTableFromImage(
           blueRun = 0;
         }
       }
-      if (blueRun >= 10) {
+      if (blueRun >= 8) {
         let lightBelow = 0;
         for (let bx = sw - blueRun; bx < sw; bx++) {
           const bIdx = ((y + 1) * sw + bx) * 4;
-          if (cd[bIdx] > 180 && cd[bIdx + 1] > 180) lightBelow++;
+          if (cd[bIdx] > 175 && cd[bIdx + 1] > 175) lightBelow++;
         }
-        if (lightBelow >= blueRun * 0.7) {
+        if (lightBelow >= blueRun * 0.65) {
           for (let bx = sw - blueRun; bx < sw; bx++) {
             const uIdx = (y * sw + bx) * 4;
             cd[uIdx] = 255;
@@ -845,7 +1602,6 @@ async function recognizeScheduleTableFromImage(
     }
     ctx1x.putImageData(cellImg, 0, 0);
 
-    // Upscale 2.25x and enhance contrast (pure white background, crisp dark ink)
     const uw = Math.round(sw * SCALE);
     const uh = Math.round(sh * SCALE);
     const upCanvas = document.createElement('canvas');
@@ -863,13 +1619,11 @@ async function recognizeScheduleTableFromImage(
       const r = ud[i];
       const g = ud[i + 1];
       const b = ud[i + 2];
-      // Treat blue link ink as dark ink
-      const ink = Math.min(r, g, Math.round(b * 0.72));
+      const ink = Math.min(r, g, Math.round(b * 0.7));
       let v = 255;
-      if (ink < 205) {
-        // Stretch [60..205] -> [0..240]
-        const normInk = Math.max(0, (ink - 65) / 140);
-        v = Math.min(255, Math.round(Math.pow(normInk, 1.35) * 245));
+      if (ink < 208) {
+        const normInk = Math.max(0, (ink - 60) / 148);
+        v = Math.min(255, Math.round(Math.pow(normInk, 1.4) * 245));
       }
       ud[i] = v;
       ud[i + 1] = v;
@@ -888,7 +1642,6 @@ async function recognizeScheduleTableFromImage(
 
   if (preparedCells.length === 0) return null;
 
-  // Pack prepared cells into vertical strips of height <= MAX_STRIP_H
   const strips: Array<{ canvas: HTMLCanvasElement; items: PreparedCellRender[] }> = [];
   let currentItems: PreparedCellRender[] = [];
   let currentY = PAD_Y;
@@ -908,7 +1661,7 @@ async function recognizeScheduleTableFromImage(
         item.slot.stripIndex = stripIdx;
         item.slot.stripY0 = yCursor;
         item.slot.stripY1 = yCursor + item.h;
-        sCtx.drawImage(item.canvas, 24, yCursor);
+        sCtx.drawImage(item.canvas, 28, yCursor);
         yCursor += item.h + PAD_Y;
       }
       strips.push({ canvas: stripCanvas, items: currentItems });
@@ -926,18 +1679,17 @@ async function recognizeScheduleTableFromImage(
   }
   flushStrip();
 
-  // 5. Recognize each vertical strip using the cached Russian Tesseract worker
   scheduleProgressCallback = onProgress || null;
   const worker = await prewarmScheduleOcrWorker();
   await worker.setParameters({
-    tessedit_pageseg_mode: '6' // Assume a single uniform column of text blocks
+    tessedit_pageseg_mode: '6'
   });
 
   for (let sIdx = 0; sIdx < strips.length; sIdx++) {
     const strip = strips[sIdx];
     onProgress?.(
-      `Распознавание таблицы (${sIdx + 1}/${strips.length})...`,
-      35 + Math.round((sIdx / strips.length) * 50)
+      `Локальное OCR-распознавание (${sIdx + 1}/${strips.length})...`,
+      42 + Math.round((sIdx / strips.length) * 46)
     );
 
     const ret = await worker.recognize(
@@ -946,7 +1698,6 @@ async function recognizeScheduleTableFromImage(
       { text: true, blocks: true, tsv: true }
     );
 
-    // Map recognized words back to their exact MergedCellSlot via vertical Y coordinate
     const slotWords = new Map<MergedCellSlot, Array<{ lineKey: string; x: number; text: string }>>();
     for (const item of strip.items) {
       slotWords.set(item.slot, []);
@@ -954,7 +1705,7 @@ async function recognizeScheduleTableFromImage(
 
     const findSlotForY = (yMid: number): MergedCellSlot | null => {
       for (const item of strip.items) {
-        if (yMid >= item.slot.stripY0 - 14 && yMid <= item.slot.stripY1 + 14) {
+        if (yMid >= item.slot.stripY0 - 16 && yMid <= item.slot.stripY1 + 16) {
           return item.slot;
         }
       }
@@ -970,7 +1721,7 @@ async function recognizeScheduleTableFromImage(
         const cols = tsvLines[i].split('\t');
         if (cols.length < 12) continue;
         const level = Number(cols[0]);
-        if (level !== 5) continue; // Level 5 = word
+        if (level !== 5) continue;
         const wordText = (cols[11] || '').trim();
         if (!wordText) continue;
 
@@ -988,7 +1739,6 @@ async function recognizeScheduleTableFromImage(
       }
     }
 
-    // Fallback to `ret.data.blocks` if TSV was not populated
     if (mappedCount === 0 && Array.isArray(ret?.data?.blocks)) {
       let lineIdx = 0;
       for (const block of ret.data.blocks) {
@@ -1011,7 +1761,6 @@ async function recognizeScheduleTableFromImage(
       }
     }
 
-    // Assemble multiline text inside each slot
     for (const [slot, words] of slotWords.entries()) {
       if (words.length === 0) continue;
       const linesMap = new Map<string, string[]>();
@@ -1027,14 +1776,9 @@ async function recognizeScheduleTableFromImage(
   scheduleProgressCallback = null;
   onProgress?.('Сборка расписания и синхронизация недель...', 92);
 
-  // 6. Populate 2D table grid `gridText[r][c]` from merged cells
   const gridText: string[][] = Array.from({ length: numRows }, () =>
     Array.from({ length: numCols }, () => '')
   );
-
-  // Also check if Column 0 (`дата`) has exactly 6 merged day groups (MON..SAT)
-  const col0Slots = mergedCells.filter((m) => m.col === 0);
-  const orderedDays: DayOfWeek[] = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 
   for (const slot of mergedCells) {
     for (let r = slot.rStart; r <= slot.rEnd; r++) {
@@ -1042,149 +1786,16 @@ async function recognizeScheduleTableFromImage(
     }
   }
 
-  // If Column 0 has 6 merged blocks (Пн, Вт, Ср, Чт, Пт, Сб), reinforce any missed short 2-letter day label
-  if (col0Slots.length === 6) {
-    col0Slots.forEach((slot, idx) => {
-      const parsed = parseDayCell(slot.text);
-      const dayCode = parsed || orderedDays[idx];
-      for (let r = slot.rStart; r <= slot.rEnd; r++) {
-        gridText[r][0] = dayCode;
-      }
-    });
-  }
-
-  // 7. Convert rows into ScheduleClass objects
-  // Standard 7-column layout: 0=дата, 1=время, 2=подгр., 3=предмет, 4=преподаватель, 5=ауд., 6=комм.
-  const is7ColLayout = numCols >= 7;
-  let currentDay: DayOfWeek = 'MON';
-  let currentTimeSlot = { startTime: '09:00', endTime: '10:30', lessonNumber: 1 };
-  const classes: ScheduleClass[] = [];
-
-  for (let r = startDataRow; r < numRows; r++) {
-    const rowCells = gridText[r];
-
-    // Day of week
-    const rawDay = rowCells[0] || '';
-    if (['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'].includes(rawDay)) {
-      currentDay = rawDay as DayOfWeek;
-    } else {
-      const detectedDay = parseDayCell(rawDay);
-      if (detectedDay) currentDay = detectedDay;
-    }
-
-    // Time slot
-    const rawTime = rowCells[1] || '';
-    const parsedTime = parseTimeCell(rawTime);
-    if (parsedTime) {
-      currentTimeSlot = parsedTime;
-    }
-
-    // Subgroup (in 7-col layout, col 2 is `подгр.`)
-    let subgroup: string | undefined;
-    if (is7ColLayout) {
-      const rawSub = (rowCells[2] || '')
-        .replace(/[Зз]/g, '3')
-        .replace(/[ІіI|l]/g, '1');
-      const subMatch = rawSub.match(/([1-4])/);
-      if (subMatch) {
-        subgroup = subMatch[1];
-      }
-    }
-
-    const subjColIdx = is7ColLayout ? 3 : 2;
-    const teacherColIdx = is7ColLayout ? 4 : 3;
-    const roomColIdx = is7ColLayout ? 5 : 4;
-    const commColIdx = is7ColLayout ? 6 : 5;
-
-    const rawSubject = cleanScheduleOcrText(rowCells[subjColIdx] || '');
-    if (!rawSubject || rawSubject.length < 3 || /^предмет$/i.test(rawSubject)) {
-      continue;
-    }
-
-    // Determine lessonType from prefix (лек.), (пр.), (лек./пр.)
-    let lessonType: LessonType = 'SEMINAR';
-    if (/\(\s*лек\s*[./]?\s*пр/i.test(rawSubject)) {
-      lessonType = 'LECTURE';
-    } else if (/\(\s*лек/i.test(rawSubject) || /\bлекц/i.test(rawSubject)) {
-      lessonType = 'LECTURE';
-    } else if (/\(\s*пр/i.test(rawSubject) || /\bпракт/i.test(rawSubject)) {
-      lessonType = 'PRACTICE';
-    } else if (/\(\s*лаб/i.test(rawSubject) || /\bлаб/i.test(rawSubject)) {
-      lessonType = 'LAB';
-    }
-
-    // Clean subject name while preserving "(лек./пр.)" info in a tidy format
-    const hasCombinedLecPr = /\(\s*лек\s*[./]?\s*пр/i.test(rawSubject);
-    let cleanSubj = rawSubject
-      .replace(/^\(\s*лек\s*[./]?\s*пр\s*[.)]*\s*/i, '')
-      .replace(/^\(\s*(?:лек|пр|лаб|сем)\s*[.)]*\s*/i, '')
-      .replace(/^[-–—:•.\s]+/, '')
-      .trim();
-
-    if (hasCombinedLecPr && !cleanSubj.includes('(лек./пр.)')) {
-      cleanSubj = `${cleanSubj} (лек./пр.)`;
-    }
-
-    const rawTeacher = cleanScheduleOcrText(rowCells[teacherColIdx] || '')
-      .replace(/^[.,\-–—\s]+|[.,\-–—\s]+$/g, '')
-      .trim();
-
-    let rawRoom = cleanScheduleOcrText(rowCells[roomColIdx] || '')
-      .replace(/^[.,\-–—\s]+|[.,\-–—\s]+$/g, '')
-      .replace(/[Зз](?=\d)/g, '3')
-      .replace(/[ОоOo](?=\d)/g, '0')
-      .replace(/(?<=\d)[ОоOo]/g, '0')
-      .replace(/[ІіI|l](?=\d)/g, '1')
-      .trim();
-
-    const rawComm = cleanScheduleOcrText(rowCells[commColIdx] || '')
-      .replace(/^[.,\-–—\s]+|[.,\-–—\s]+$/g, '')
-      .trim();
-
-    if ((!rawRoom || rawRoom.length <= 1) && /ДОТ|дистанц|portal\.novsu/i.test(rawComm)) {
-      rawRoom = 'ДОТ';
-    }
-
-    // Determine weekParity from comments
-    let weekParity: WeekParityType = 'BOTH';
-    if (/верхн|нечет|числит/i.test(rawComm)) {
-      weekParity = 'UPPER';
-    } else if (/нижн|четн|знамен/i.test(rawComm)) {
-      weekParity = 'LOWER';
-    }
-
-    // Extract week range ("до 9 недели", "после 9 недели")
-    const weekRange = extractWeekRangeFromText(`${rawComm} ${cleanSubj}`);
-
-    // Extract linkUrl if present in comment
-    const urlMatch = rawComm.match(/https?:\/\/[^\s,]+/i);
-
-    classes.push({
-      id: `ghp-tbl-${Date.now()}-${classes.length}`,
-      day: currentDay,
-      weekParity,
-      lessonNumber: currentTimeSlot.lessonNumber,
-      startTime: currentTimeSlot.startTime,
-      endTime: currentTimeSlot.endTime,
-      subject: cleanSubj.slice(0, 120),
-      lessonType,
-      subgroup,
-      weekFrom: weekRange.weekFrom,
-      weekTo: weekRange.weekTo,
-      weekRangeLabel: weekRange.weekRangeLabel,
-      classroom: rawRoom || undefined,
-      teacher: rawTeacher || undefined,
-      notes: rawComm || undefined,
-      linkUrl: urlMatch ? urlMatch[0] : undefined,
-      notificationEnabled: true
-    });
-  }
-
+  const classes = convert2DStringGridToSchedule(gridText.slice(startDataRow));
   return classes.length > 0 ? classes : null;
 }
 
 /**
- * Client-side schedule parser fallback for GitHub Pages (supports 7-column table OCR & plain text).
+ * Unified Hybrid Schedule Parser for GitHub Pages (and local fallback in AI Studio).
+ * Automatically cascades:
+ * 1. For URLs: HTML Table DOM Parser via CORS proxy -> Cloud Multimodal AI -> Text Parser.
+ * 2. For Screenshots: Cloud Multimodal Vision AI -> Local Continuous-Line Canvas Grid + OCR -> Full-image OCR.
+ * 3. For Text: Structured TSV/Table Text Parser -> Cloud AI.
  */
 export async function parseScheduleClientFallback(params: {
   imageBase64?: string;
@@ -1192,16 +1803,73 @@ export async function parseScheduleClientFallback(params: {
   url?: string;
   onProgress?: (stage: string, percent: number) => void;
 }): Promise<{ classes: ScheduleClass[]; summary: string }> {
-  // 1. If an image screenshot is provided, first run the high-precision Canvas Table Grid + Cell OCR pipeline
-  if (params.imageBase64 && !params.text) {
+  // CASE A: URL INPUT
+  if (params.url && params.url.trim()) {
+    const targetUrl = params.url.trim();
+    params.onProgress?.('Загрузка таблицы расписания по ссылке...', 20);
     try {
-      const tableClasses = await recognizeScheduleTableFromImage(params.imageBase64, params.onProgress);
+      const html = await fetchHtmlViaCorsProxy(targetUrl, 10000);
+      params.onProgress?.('Извлечение строк и объединённых ячеек HTML-таблицы...', 55);
+      const domClasses = parseScheduleFromHtmlDom(html);
+      if (domClasses && domClasses.length > 0) {
+        return {
+          classes: domClasses,
+          summary: `HTML-таблица расписания по ссылке успешно разобрана: найдено ${domClasses.length} пар (дней: ${
+            new Set(domClasses.map((c) => c.day)).size
+          }).`
+        };
+      }
+
+      // If no <table> in HTML, extract visible text and run hybrid parser
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      doc.querySelectorAll('script, style, noscript').forEach((e) => e.remove());
+      const extractedText = (doc.body?.textContent || '').trim();
+      if (extractedText.length > 30) {
+        const cloudFromUrl = await tryCloudMultimodalScheduleParse({
+          text: extractedText,
+          onProgress: params.onProgress
+        });
+        if (cloudFromUrl && cloudFromUrl.classes.length > 0) {
+          return cloudFromUrl;
+        }
+        const localFromUrl = parseScheduleFromStructuredText(extractedText);
+        if (localFromUrl.length > 0) {
+          return {
+            classes: localFromUrl,
+            summary: `Со страницы расписания извлечено ${localFromUrl.length} занятий.`
+          };
+        }
+      }
+    } catch {
+      throw new Error(
+        'Сайт вуза блокирует прямое чтение по ссылке. Скопируйте таблицу на странице (Ctrl+A / Ctrl+C) и вставьте её во вкладку «ТЕКСТ» или загрузите скриншот.'
+      );
+    }
+  }
+
+  // CASE B: SCREENSHOT IMAGE INPUT
+  if (params.imageBase64 && !params.text) {
+    // 1. Try Cloud Multimodal Vision Gateway first (fast, high accuracy on zoomed-out screenshots)
+    const cloudResult = await tryCloudMultimodalScheduleParse({
+      imageBase64: params.imageBase64,
+      onProgress: params.onProgress
+    });
+    if (cloudResult && cloudResult.classes.length >= 3) {
+      return cloudResult;
+    }
+
+    // 2. Automatic switch to Local Continuous-Line Canvas Grid + OCR
+    try {
+      const tableClasses = await recognizeScheduleTableFromImage(
+        params.imageBase64,
+        params.onProgress
+      );
       if (tableClasses && tableClasses.length > 0) {
         const withSubgroups = tableClasses.filter((c) => c.subgroup).length;
         const withWeekBounds = tableClasses.filter((c) => c.weekFrom || c.weekTo).length;
         return {
           classes: tableClasses,
-          summary: `Табличный ИИ-анализ завершён: распознано ${tableClasses.length} пар по 7 колонкам (дней: ${
+          summary: `Локальный табличный OCR-анализ завершён: распознано ${tableClasses.length} пар по 7 колонкам (дней: ${
             new Set(tableClasses.map((c) => c.day)).size
           }${withSubgroups > 0 ? `, с подгруппами: ${withSubgroups}` : ''}${
             withWeekBounds > 0 ? `, с диапазонами недель: ${withWeekBounds}` : ''
@@ -1209,110 +1877,67 @@ export async function parseScheduleClientFallback(params: {
         };
       }
     } catch {
-      // Fall through to full-page OCR fallback if table grid was not detected
+      // Fall through to full-page OCR
     }
-  }
 
-  let rawText = params.text || '';
-
-  if (!rawText && params.imageBase64) {
+    // 3. Fallback full-image OCR
     scheduleProgressCallback = params.onProgress || null;
     try {
       const worker = await prewarmScheduleOcrWorker();
       const ret = await worker.recognize(params.imageBase64);
-      rawText = String(ret?.data?.text || '');
+      const rawText = String(ret?.data?.text || '');
+      const fromText = parseScheduleFromStructuredText(rawText);
+      return {
+        classes: fromText,
+        summary: `Распознано занятий: ${fromText.length}. Проверьте и при необходимости скорректируйте строки в таблице ниже.`
+      };
     } finally {
       scheduleProgressCallback = null;
     }
   }
 
-  const lines = rawText
-    .split(/\r?\n/)
-    .map((l) => cleanScheduleOcrText(l))
-    .filter((l) => l.length > 2);
-
-  const dayMap: Array<{ pattern: RegExp; code: DayOfWeek }> = [
-    { pattern: /^(понедельник|пн|mon)\b/i, code: 'MON' },
-    { pattern: /^(вторник|вт|tue)\b/i, code: 'TUE' },
-    { pattern: /^(среда|ср|wed)\b/i, code: 'WED' },
-    { pattern: /^(четверг|чт|thu)\b/i, code: 'THU' },
-    { pattern: /^(пятница|пт|fri)\b/i, code: 'FRI' },
-    { pattern: /^(суббота|сб|sat)\b/i, code: 'SAT' }
-  ];
-
-  let currentDay: DayOfWeek = 'MON';
-  let currentParity: WeekParityType = 'BOTH';
-  const parsedClasses: ScheduleClass[] = [];
-
-  for (const line of lines) {
-    const matchedDay = dayMap.find((d) => d.pattern.test(line));
-    if (matchedDay && line.length < 20) {
-      currentDay = matchedDay.code;
-      continue;
+  // CASE C: TEXT / TSV PASTE INPUT
+  if (params.text && params.text.trim()) {
+    params.onProgress?.('Разбор текста и колонок расписания...', 30);
+    // 1. If HTML table was pasted directly
+    const domFromText = parseScheduleFromHtmlDom(params.text);
+    if (domFromText && domFromText.length > 0) {
+      return {
+        classes: domFromText,
+        summary: `Распознано ${domFromText.length} занятий из скопированной таблицы.`
+      };
     }
 
-    if (/верхн|нечет/i.test(line) && line.length < 25) {
-      currentParity = 'UPPER';
-      continue;
-    }
-    if (/нижн|четн/i.test(line) && line.length < 25) {
-      currentParity = 'LOWER';
-      continue;
-    }
-
-    const timeMatch = line.match(/(\d{1,2}[:.]\d{2})\s*[-–—]\s*(\d{1,2}[:.]\d{2})/);
-    const singleTimeMatch = line.match(/\b([0-2]?\d:[0-5]\d)\b/);
-    const numMatch = line.match(/^([1-7])\s*(?:пара|[.)]|-я)/i);
-
-    if (timeMatch || singleTimeMatch || numMatch || /\((?:лек|пр|лаб)/i.test(line)) {
-      const lessonNum = numMatch ? Number(numMatch[1]) : (parsedClasses.length % 6) + 1;
-      const stdTime = STANDARD_LESSON_TIMES[lessonNum - 1] || { start: '09:00', end: '10:30' };
-      const startTime = timeMatch
-        ? timeMatch[1].replace('.', ':').padStart(5, '0')
-        : singleTimeMatch
-        ? singleTimeMatch[1].padStart(5, '0')
-        : stdTime.start;
-      const endTime = timeMatch ? timeMatch[2].replace('.', ':').padStart(5, '0') : stdTime.end;
-
-      const cleanedSubject = line
-        .replace(/(\d{1,2}[:.]\d{2})\s*[-–—]\s*(\d{1,2}[:.]\d{2})/g, '')
-        .replace(/^([1-7])\s*(?:пара|[.)]|-я)\s*/i, '')
-        .replace(/^[-–—:•\s]+/, '')
-        .trim();
-
-      if (cleanedSubject.length >= 3) {
-        const lessonType: LessonType = /лек/i.test(cleanedSubject)
-          ? 'LECTURE'
-          : /пр/i.test(cleanedSubject)
-          ? 'PRACTICE'
-          : /лаб/i.test(cleanedSubject)
-          ? 'LAB'
-          : 'SEMINAR';
-
-        const weekRange = extractWeekRangeFromText(line);
-        const subMatch = line.match(/\b([1-3])\s*\)/);
-
-        parsedClasses.push({
-          id: `ghp-cls-${Date.now()}-${parsedClasses.length}`,
-          day: currentDay,
-          weekParity: /верхн/i.test(line) ? 'UPPER' : /нижн/i.test(line) ? 'LOWER' : currentParity,
-          lessonNumber: lessonNum,
-          startTime,
-          endTime,
-          subject: cleanedSubject.slice(0, 100),
-          lessonType,
-          subgroup: subMatch ? subMatch[1] : undefined,
-          weekFrom: weekRange.weekFrom,
-          weekTo: weekRange.weekTo,
-          weekRangeLabel: weekRange.weekRangeLabel,
-          notificationEnabled: true
-        });
+    // 2. Try deterministic TSV / structured text parser first if tabs are present
+    if (params.text.includes('\t')) {
+      const tsvClasses = parseScheduleFromStructuredText(params.text);
+      if (tsvClasses.length >= 2) {
+        return {
+          classes: tsvClasses,
+          summary: `Табличный текст разобран мгновенно: найдено ${tsvClasses.length} пар.`
+        };
       }
     }
+
+    // 3. Try Cloud AI for free-form text
+    const cloudTextResult = await tryCloudMultimodalScheduleParse({
+      text: params.text,
+      onProgress: params.onProgress
+    });
+    if (cloudTextResult && cloudTextResult.classes.length > 0) {
+      return cloudTextResult;
+    }
+
+    // 4. Local structured text fallback
+    const localClasses = parseScheduleFromStructuredText(params.text);
+    return {
+      classes: localClasses,
+      summary: `Распознано занятий из текста: ${localClasses.length}.`
+    };
   }
 
   return {
-    classes: parsedClasses,
-    summary: `Распознано занятий: ${parsedClasses.length}. Вы можете отредактировать любые поля в таблице предпросмотра ниже.`
+    classes: [],
+    summary: 'Не удалось обнаружить данные расписания.'
   };
 }
